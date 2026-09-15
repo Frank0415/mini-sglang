@@ -29,6 +29,23 @@ HF model directory
 → models/llama.py: LlamaForCausalLM creates the model layers from the configuration
 ```
 
+## Model Structure
+
+```text
+LlamaForCausalLM
+├── LlamaModel
+│   ├── Embedding
+│   ├── Multiple LlamaDecoderLayer instances
+│   │   ├── Input RMSNorm
+│   │   ├── LlamaAttention
+│   │   ├── Residual connection
+│   │   ├── Post-attention RMSNorm
+│   │   ├── LlamaMLP
+│   │   └── Residual connection
+│   └── Final RMSNorm
+└── LM head
+```
+
 ## Directory Structure
 
 ```text

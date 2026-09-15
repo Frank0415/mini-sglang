@@ -29,6 +29,23 @@ HF 模型目录
 → models/llama.py：LlamaForCausalLM：按配置创建模型层
 ```
 
+## 模型结构
+
+```
+LlamaForCausalLM
+├── LlamaModel
+│   ├── Embedding
+│   ├── 多个 LlamaDecoderLayer
+│   │   ├── 输入 RMSNorm
+│   │   ├── LlamaAttention
+│   │   ├── 残差连接
+│   │   ├── 后置 RMSNorm
+│   │   ├── LlamaMLP
+│   │   └── 残差连接
+│   └── 最终 RMSNorm
+└── LM head
+```
+
 ## 目录结构
 
 ```
