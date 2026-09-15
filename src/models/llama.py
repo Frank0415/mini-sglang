@@ -1,8 +1,11 @@
 import torch.nn as nn
 import torch
+from torch.nn import functional as F
 from ..configs.model_config import ModelConfig
 from transformers import LlamaConfig
-from ..layers.layers import Embedding,LMhead,RMSNorm
+
+from ..layers.layers import Embedding, LMhead, RMSNorm
+from ..layers.attention.torch_backend import TorchAttentionBackend
 
 class LlamaForCausalLM(nn.Module):
     LlamaModel: nn.Module
@@ -60,3 +63,28 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config = config
+
+class LlamaMLP(nn.Module):
+    def __init__(self, config: LlamaConfig):
+        super().__init__()
+        self.gate_proj = nn.Linear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=config.mlp_bias,
+        )
+        self.up_proj = nn.Linear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=config.mlp_bias,
+        )
+        self.down_proj = nn.Linear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=config.mlp_bias,
+        )
+
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        # SmolLM2 uses SwiGLU
+        return self.down_proj(
+            F.silu(self.gate_proj(x)) * self.up_proj(x)
+        )

@@ -19,7 +19,7 @@ class RMSNorm(nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 
-class Embedding(nn.Module):
+class Embedding(nn.Embedding):
     def __init__(self, config: LlamaConfig):
         super().__init__(
             num_embeddings=config.vocab_size,
@@ -28,7 +28,7 @@ class Embedding(nn.Module):
         )
 
 
-class LMhead(nn.Module):
+class LMhead(nn.Linear):
     def __init__(self, config: LlamaConfig):
         super().__init__(
             in_features=config.hidden_size,
