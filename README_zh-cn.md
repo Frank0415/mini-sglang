@@ -1,5 +1,34 @@
 # mini-sglang
 
+# 加载模型并进行推理
+
+以 `smollm2-135m-instruct` 为例，展示加载并进行推理的流程。
+
+## 模型加载
+
+```
+ModelConfig
+├── architectures (hf_config.architectures)
+└── hf_config
+    ├── hidden_size
+    ├── num_hidden_layers
+    └── tie_word_embeddings
+```
+
+实际加载通过model_loader/loader.py 加载模型，并返回模型实例：
+
+```
+model_class = ModelRegistry.get_model_class(model_config.architectures)
+model = model_class(model_config.hf_config)
+```
+
+```
+HF 模型目录
+→ configs/model_config.py：ModelConfig：读取完整配置
+→ models/registry.py：注册表：找到 LlamaForCausalLM 类
+→ models/llama.py：LlamaForCausalLM：按配置创建模型层
+```
+
 ## 目录结构
 
 ```

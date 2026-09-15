@@ -1,5 +1,34 @@
 # mini-sglang
 
+# Loading a Model and Running Inference
+
+This example uses `smollm2-135m-instruct` to show the model loading and inference workflow.
+
+## Model Loading
+
+```text
+ModelConfig
+├── architectures (hf_config.architectures)
+└── hf_config
+    ├── hidden_size
+    ├── num_hidden_layers
+    └── tie_word_embeddings
+```
+
+`model_loader/loader.py` loads the model and returns a model instance:
+
+```python
+model_class = ModelRegistry.get_model_class(model_config.architectures)
+model = model_class(model_config.hf_config)
+```
+
+```text
+HF model directory
+→ configs/model_config.py: ModelConfig reads the complete configuration
+→ models/registry.py: The registry finds the LlamaForCausalLM class
+→ models/llama.py: LlamaForCausalLM creates the model layers from the configuration
+```
+
 ## Directory Structure
 
 ```text
