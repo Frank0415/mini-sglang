@@ -1,4 +1,3 @@
-from turtle import forward
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -9,14 +8,17 @@ from ..layers.layers import Embedding, LMhead, RMSNorm
 from ..layers.rotary_embedding import apply_rope
 
 class LlamaForCausalLM(nn.Module):
-    LlamaModel: nn.Module
-    LMhead: nn.Module
+    model: nn.Module
+    lm_head: nn.Module
 
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config = config
-        self.LlamaModel = LlamaModel(config)
-        self.LMhead = LMhead(config)
+        self.model = LlamaModel(config)
+        self.lm_head = LMhead(config)
+
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None
@@ -26,8 +28,8 @@ class LlamaForCausalLM(nn.Module):
         position_ids: [batch_size, seq_len]
         return: [batch_size, seq_len, hidden_size]
         """
-        hidden_states = self.LlamaModel(input_ids, position_ids)
-        return self.LMhead(hidden_states)
+        hidden_states = self.model(input_ids, position_ids)
+        return self.lm_head(hidden_states)
 
     @torch.no_grad()
     def load_weights(
@@ -62,18 +64,18 @@ class LlamaForCausalLM(nn.Module):
             raise ValueError(f"Missing weights: {missing}")
 
 class LlamaModel(nn.Module):
-    Embedding: nn.Module
-    LlamaDecoderLayer: nn.Module
-    FinalRMSNorm: nn.Module
+    embed_tokens: nn.Module
+    layers: nn.ModuleList
+    norm: nn.Module
 
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config = config
-        self.Embedding = Embedding(config)
-        self.LlamaDecoderLayer = nn.ModuleList(
+        self.embed_tokens = Embedding(config)
+        self.layers = nn.ModuleList(
             LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
         )
-        self.FinalRMSNorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor
@@ -90,18 +92,19 @@ class LlamaModel(nn.Module):
                 seq_len, device=input_ids.device
             ).unsqueeze(0).expand(batch_size, -1)
 
-        hidden_states = self.Embedding(input_ids)
+        hidden_states = self.embed_tokens(input_ids)
 
         for layer in self.layers:
             hidden_states = layer(hidden_states, position_ids)
 
-        return self.FinalRMSNorm(hidden_states)
+        return self.norm(hidden_states)
 
 
 class LlamaDecoderLayer(nn.Module):
-    RMSNorm: nn.Module
-    LlamaAttention: nn.Module
-    LlamaMLP: nn.Module
+    input_layernorm: nn.Module
+    self_attn: nn.Module
+    post_attention_layernorm: nn.Module
+    mlp: nn.Module
 
     def __init__(self, config: LlamaConfig):
         super().__init__()
