@@ -10,6 +10,7 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "numpy>=2.5.3",
     "torch==2.14.0",
+    "transformers>=5.17.0",
     "triton",
 ]
 
@@ -20,7 +21,3 @@ torch = { index = "pytorch-cu132" }
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
 explicit = true
-
-[build-system]
-requires = ["uv_build>=0.12.3,<0.13.0"]
-build-backend = "uv_build"
