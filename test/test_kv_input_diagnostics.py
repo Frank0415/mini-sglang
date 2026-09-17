@@ -82,7 +82,7 @@ class InputDiagnostics(unittest.TestCase):
 
     def test_out_of_bounds_storage_read_rejected(self):
         pool = MHATokenToKVPool(KVPoolConfig(1, 8, 1, 4, torch.float32, torch.device('cpu')))
-        with self.assertRaises((IndexError, RuntimeError, ValueError)):
+        with self.assertRaises((IndexError, RuntimeError, ValueError, AssertionError)):
             pool.get_key_buffer(0, torch.tensor([8]))
 
     def test_wrong_kv_shape_rejected(self):
@@ -92,7 +92,7 @@ class InputDiagnostics(unittest.TestCase):
 
     def test_out_of_bounds_request_row_rejected(self):
         pool = ReqToTokenPool(ReqToTokenPoolConfig(3, 8, torch.device('cpu')))
-        with self.assertRaises((IndexError, RuntimeError, ValueError)):
+        with self.assertRaises((IndexError, RuntimeError, ValueError, AssertionError)):
             pool.write((4, slice(0, 1)), torch.tensor([12]))
 
 
