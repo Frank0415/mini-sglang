@@ -10,13 +10,13 @@ import unittest
 import torch
 
 from src.mem_cache.allocator import (
-    KVPoolConfig, MHATokenToKVPool, PagedTokenToKVPoolAllocator,
+    MHATokenToKVPool, PagedTokenToKVPoolAllocator,
 )
-from src.mem_cache.memory_pool import ReqToTokenPool, ReqToTokenPoolConfig
+from src.mem_cache.memory_pool import ReqToTokenPool
 
 
 def request_pool(rows=3, length=16):
-    return ReqToTokenPool(ReqToTokenPoolConfig(rows, length, torch.device('cpu')))
+    return ReqToTokenPool(rows, length, torch.device('cpu'))
 
 
 def extend(allocator, previous, count):
@@ -278,16 +278,15 @@ def make_storage_case(device, dtype, heads):
     def test(self):
         if device == 'cuda' and not torch.cuda.is_available():
             self.skipTest('CUDA unavailable')
-        cfg = KVPoolConfig(3, 32, heads, 8, dtype, torch.device(device))
-        pool = MHATokenToKVPool(cfg)
-        expected_k = torch.zeros((3, cfg.capacity + cfg.page_size, heads, 8), device=device, dtype=dtype)
+        pool = MHATokenToKVPool(3, 32, heads, 8, dtype, torch.device(device))
+        expected_k = torch.zeros((3, pool.capacity + pool.page_size, heads, 8), device=device, dtype=dtype)
         expected_v = torch.zeros_like(expected_k)
         # Unwritten memory has no defined value; initialize only for isolation checks.
         pool.k_buffer.zero_()
         pool.v_buffer.zero_()
         # Full-layer getters share storage; selection now belongs to the caller.
         layer_k, layer_v = pool.get_kv_buffer(1)
-        self.assertEqual(tuple(layer_k.shape), (cfg.capacity + cfg.page_size, heads, 8))
+        self.assertEqual(tuple(layer_k.shape), (pool.capacity + pool.page_size, heads, 8))
         self.assertEqual(layer_k.data_ptr(), pool.k_buffer[1].data_ptr())
         self.assertEqual(layer_v.data_ptr(), pool.v_buffer[1].data_ptr())
         slots = torch.tensor([28, 12, 15, 13], device=device)
@@ -326,7 +325,7 @@ class IntegrationTests(unittest.TestCase):
     def test_two_requests_do_not_overwrite_each_others_kv(self):
         rows = request_pool(2)
         alloc = PagedTokenToKVPoolAllocator(4, 4)
-        kv = MHATokenToKVPool(KVPoolConfig(2, 16, 3, 8, torch.float32, torch.device('cpu'), page_size=4))
+        kv = MHATokenToKVPool(2, 16, 3, 8, torch.float32, torch.device('cpu'), page_size=4)
         a = rows.alloc_rows(1)[0]
         b = rows.alloc_rows(1)[0]
         sa = torch.tensor(extend(alloc, [], 3))

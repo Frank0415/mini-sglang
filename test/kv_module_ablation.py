@@ -15,8 +15,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.mem_cache.allocator import KVPoolConfig, MHATokenToKVPool, PagedTokenToKVPoolAllocator
-from src.mem_cache.memory_pool import ReqToTokenPool, ReqToTokenPoolConfig
+from src.mem_cache.allocator import MHATokenToKVPool, PagedTokenToKVPoolAllocator
+from src.mem_cache.memory_pool import ReqToTokenPool
 
 
 class Rejected(ValueError):
@@ -39,9 +39,9 @@ class ModuleHarness:
                 raise Rejected('invalid startup configuration')
             if capacity < page_size * pages:
                 raise Rejected('allocator can address slots outside KV storage')
-        self.rows = ReqToTokenPool(ReqToTokenPoolConfig(4, context, torch.device('cpu')))
+        self.rows = ReqToTokenPool(4, context, torch.device('cpu'))
         self.alloc = PagedTokenToKVPoolAllocator(page_size, pages)
-        self.kv = MHATokenToKVPool(KVPoolConfig(2, capacity, 3, 4, torch.float32, torch.device('cpu'), page_size=page_size))
+        self.kv = MHATokenToKVPool(2, capacity, 3, 4, torch.float32, torch.device('cpu'), page_size=page_size)
         self.kv.k_buffer.zero_()
         self.kv.v_buffer.zero_()
         self.context = context

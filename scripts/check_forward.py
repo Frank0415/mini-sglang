@@ -9,6 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from src.model_loader.loader import load_model
+from src.layers.attention.torch_backend import TorchAttnBackend
 
 DEFAULT_MODEL_DIR = PROJECT_ROOT / (
     "models/smollm2-135m-instruct/"
@@ -65,7 +66,11 @@ def main():
         raise RuntimeError("This check requires CUDA for the local flash attention backend")
     torch.manual_seed(0)
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
-    model = load_model(args.model_dir, device="cuda", dtype=torch.bfloat16)
+    backend = TorchAttnBackend()
+    model = load_model(
+        args.model_dir, device="cuda", dtype=torch.bfloat16, attn_backend=backend
+    )
+    assert all(layer.self_attn.backend is backend for layer in model.model.layers)
     reference = AutoModelForCausalLM.from_pretrained(
         args.model_dir,
         local_files_only=True,
