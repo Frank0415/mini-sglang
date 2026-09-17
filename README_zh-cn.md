@@ -4,29 +4,33 @@
 
 以 `smollm2-135m-instruct` 为例，展示加载并进行推理的实现。
 
-## 模型加载
+## 模型初始化
 
 ```
-ModelConfig
-├── architectures (hf_config.architectures)
-└── hf_config
-    ├── hidden_size
-    ├── num_hidden_layers
-    └── tie_word_embeddings
-```
-
-实际加载通过model_loader/loader.py 加载模型，并返回模型实例：
-
-```
-model_class = ModelRegistry.get_model_class(model_config.architectures)
-model = model_class(model_config.hf_config)
-```
-
-通过 model_loader/weight_utils.py 读取权重文件，并返回权重文件的迭代器，通过 model.load_weights 加载权重。
-
-
-```
-model.load_weights(iter_weights(model_dir))
+ModelRunner 初始化
+│
+├── 1. 读取模型配置
+│      ModelConfig.from_pretrained(model_dir)
+│
+├── 2. 创建模型并加载权重
+│      ModelRegistry → LlamaForCausalLM → load_weights
+│
+├── 3. 生成三个组件的配置
+│      make_pool_configs
+│      ├── 模型参数：层数、KV 头数、每头维度
+│      ├── 模型精度：实际权重 dtype
+│      └── 运行设置：页大小、页数、请求数、长度上限
+│
+├── 4. 创建缓存组件
+│      ├── ReqToTokenPool
+│      ├── PagedTokenToKVPoolAllocator
+│      └── MHATokenToKVPool
+│
+├── 5. 创建 TorchAttnBackend
+│      引用请求映射池和 KV 存储池
+│
+└── 6. 组装 ModelRuntime
+       保存缓存组、后端和层号映射
 ```
 
 ```
@@ -75,6 +79,80 @@ KV Cache 借鉴了 sglang 的实现，包含请求映射池 `ReqToTokenPool`、�
 
 TokenToKVPoolAllocator
     └── 管理哪些物理槽位可以分配、哪些已经归还
+```
+
+## KV Cache 资源管理
+
+```
+本轮 Q、K、V
+│
+├── Q ─────────────────────────────┐
+│                                  │
+└── K、V                           │
+    │                              │
+    ▼                              │
+set_kv_buffer                      │
+写入 out_cache_loc 指定的槽位        │
+    │                              │
+    ▼                              │
+查询请求映射表                       │
+取得该请求的有效历史槽位               │
+    │                              │
+    ▼                              │
+从当前层缓冲区读取 K、V               │
+历史 + 本轮输入                      │
+    │                              │
+    └──────────────┬───────────────┘
+                   ▼
+          根据位置生成注意力遮罩
+                   │
+                   ▼
+              PyTorch SDPA
+                   │
+                   ▼
+          只返回本轮 token 的结果
+```
+
+```
+请求 A：映射表第 2 行
+│
+├── 逻辑位置 0 → 槽位 12 ┐
+├── 逻辑位置 1 → 槽位 13 │
+├── 逻辑位置 2 → 槽位 14 ├── 页 3
+├── 逻辑位置 3 → 槽位 15 ┘
+│
+├── 逻辑位置 4 → 槽位 28 ┐
+└── 逻辑位置 5 → 槽位 29 ├── 页 7
+                槽位 30 │   剩余位置留给请求 A
+                槽位 31 ┘
+```
+
+## ForwardContext 资源管理
+
+```
+ForwardContext
+│
+├── runtime：长期共享的资源
+│   │
+│   ├── groups[group_id]
+│   │   ├── req_to_token_pool
+│   │   ├── kv_pool
+│   │   ├── allocator
+│   │   └── backend
+│   │
+│   └── layers[模型层号]
+│       ├── group_id：使用哪个缓存组
+│       └── local_layer_id：使用池内哪一层
+│
+└── batch：本轮执行信息
+    │
+    ├── mode：EXTEND / DECODE
+    ├── seq_lens：包含本轮输入后的总长度
+    ├── extend_lens：本轮新增输入长度
+    │
+    └── cache_batches[group_id]
+        ├── req_pool_indices：请求映射表行号
+        └── out_cache_loc：本轮 KV 写入槽位
 ```
 
 # 目录结构

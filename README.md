@@ -4,28 +4,33 @@
 
 This example uses `smollm2-135m-instruct` to show the model loading and inference workflow.
 
-## Model Loading
+## Model Initialization
 
 ```text
-ModelConfig
-├── architectures (hf_config.architectures)
-└── hf_config
-    ├── hidden_size
-    ├── num_hidden_layers
-    └── tie_word_embeddings
-```
-
-`model_loader/loader.py` loads the model and returns a model instance:
-
-```python
-model_class = ModelRegistry.get_model_class(model_config.architectures)
-model = model_class(model_config.hf_config)
-```
-
-`model_loader/weight_utils.py` reads the weight files and provides an iterator over their weights. The model loads these weights through `model.load_weights`:
-
-```python
-model.load_weights(iter_weights(model_dir))
+ModelRunner initialization
+│
+├── 1. Read the model configuration
+│      ModelConfig.from_pretrained(model_dir)
+│
+├── 2. Create the model and load weights
+│      ModelRegistry → LlamaForCausalLM → load_weights
+│
+├── 3. Generate configurations for the three components
+│      make_pool_configs
+│      ├── Model parameters: layer count, KV head count, and head dimension
+│      ├── Model precision: actual weight dtype
+│      └── Runtime settings: page size, page count, request count, and length limit
+│
+├── 4. Create cache components
+│      ├── ReqToTokenPool
+│      ├── PagedTokenToKVPoolAllocator
+│      └── MHATokenToKVPool
+│
+├── 5. Create TorchAttnBackend
+│      Reference the request mapping pool and KV storage pool
+│
+└── 6. Assemble ModelRuntime
+       Store cache groups, backends, and layer mappings
 ```
 
 ```text
@@ -74,6 +79,80 @@ Request index + token position in the sequence
 
 TokenToKVPoolAllocator
     └── Track which physical slots are available and which have been released
+```
+
+## KV Cache Resource Management
+
+```text
+Q, K, V for the current step
+│
+├── Q ────────────────────────────────────┐
+│                                         │
+└── K, V                                  │
+    │                                     │
+    ▼                                     │
+set_kv_buffer                             │
+Write to the slots in out_cache_loc       │
+    │                                     │
+    ▼                                     │
+Look up the request mapping table         │
+Get the request's valid history slots     │
+    │                                     │
+    ▼                                     │
+Read K, V from the current layer's buffer │
+History + current input                   │
+    │                                     │
+    └──────────────────┬──────────────────┘
+                       ▼
+        Build the attention mask from positions
+                       │
+                       ▼
+                  PyTorch SDPA
+                       │
+                       ▼
+        Return results only for the current tokens
+```
+
+```text
+Request A: row 2 of the mapping table
+│
+├── Logical position 0 → slot 12 ┐
+├── Logical position 1 → slot 13 │
+├── Logical position 2 → slot 14 ├── Page 3
+├── Logical position 3 → slot 15 ┘
+│
+├── Logical position 4 → slot 28 ┐
+└── Logical position 5 → slot 29 ├── Page 7
+                        slot 30 │   Remaining slots reserved for request A
+                        slot 31 ┘
+```
+
+## ForwardContext Resource Management
+
+```text
+ForwardContext
+│
+├── runtime: long-lived shared resources
+│   │
+│   ├── groups[group_id]
+│   │   ├── req_to_token_pool
+│   │   ├── kv_pool
+│   │   ├── allocator
+│   │   └── backend
+│   │
+│   └── layers[model_layer_id]
+│       ├── group_id: which cache group to use
+│       └── local_layer_id: which layer within the pool to use
+│
+└── batch: execution information for the current step
+    │
+    ├── mode: EXTEND / DECODE
+    ├── seq_lens: total lengths including the current input
+    ├── extend_lens: lengths of the new input in this step
+    │
+    └── cache_batches[group_id]
+        ├── req_pool_indices: row indices in the request mapping table
+        └── out_cache_loc: KV write slots for the current step
 ```
 
 # Directory Structure
