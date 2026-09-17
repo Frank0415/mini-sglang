@@ -58,11 +58,34 @@ class MHATokenToKVPool(TokenToKVPool):
             shape, dtype=config.dtype, device=config.device
         )
 
+    def set_kv_buffer(
+        self,
+        layer_id:int,
+        slot_ids:torch.Tensor,
+        k:torch.Tensor,
+        v:torch.Tensor
+    ) -> None:
+        pass
 
-class PagedTokenToKVPollAllocator:
-    def __init__(self):
-        self.total_reqs = 0
+    def get_key_buffer(
+        self,
+        layer_id:int,
+        slot_ids:torch.Tensor
+    ) -> torch.Tensor:
+        pass
 
+    def get_value_buffer(
+        self,
+        layer_id:int,
+        slot_ids:torch.Tensor
+    ) -> torch.Tensor:
+        pass
+
+class PagedTokenToKVPoolAllocator:
+    def __init__(self,page_size:int, num_pages:int):
+        self.page_size = page_size
+        self.num_pages = num_pages
+        self.free_pages = list[bool]([True] * num_pages)
 
     def alloc_extend():
         raise NotImplementedError("PagedTokenToKVPollAllocator.alloc_extend is not implemented")

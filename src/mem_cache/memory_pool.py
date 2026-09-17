@@ -2,13 +2,11 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-
 @dataclass
 class ReqToTokenPoolConfig:
     total_reqs: int
     max_context_len: int
     device: torch.device
-
 
 class ReqToTokenPool:
     def __init__(self,config:ReqToTokenPoolConfig):
