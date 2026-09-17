@@ -21,7 +21,6 @@ PROMPTS = (
     "Explain why the sky looks blue in two sentences.",
 )
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)

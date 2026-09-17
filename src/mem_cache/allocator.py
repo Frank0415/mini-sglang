@@ -7,11 +7,12 @@ import torch
 @dataclass
 class KVPoolConfig:
     num_layers: int
-    capacity: int  # How many token's KV can be stored
+    capacity: int  # Usable token slots, excluding reserved page 0
     num_kv_heads: int
     head_dim: int
     dtype: torch.dtype
     device: torch.device
+    page_size: int = 1
 
 
 class TokenToKVPool(ABC):
@@ -24,24 +25,27 @@ class TokenToKVPool(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def get_key_buffer(self, layer_id: int, slot_ids: torch.Tensor) -> torch.Tensor: ...
+    def get_key_buffer(self, layer_id: int) -> torch.Tensor: ...
 
     @abstractmethod
-    def get_value_buffer(
-        self, layer_id: int, slot_ids: torch.Tensor
-    ) -> torch.Tensor: ...
+    def get_value_buffer(self, layer_id: int) -> torch.Tensor: ...
+
+    @abstractmethod
+    def get_kv_buffer(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 class MHATokenToKVPool(TokenToKVPool):
     def __init__(self, config: KVPoolConfig):
         assert config.num_layers > 0, "num_layers must be positive"
         assert config.capacity >= 0, "capacity must be nonnegative"
+        assert config.page_size > 0, "page_size must be positive"
+        assert config.capacity % config.page_size == 0, "capacity must be page-aligned"
         assert config.num_kv_heads > 0, "num_kv_heads must be positive"
         assert config.head_dim > 0, "head_dim must be positive"
         super().__init__(config)
         shape = (
             config.num_layers,
-            config.capacity,
+            config.capacity + config.page_size,
             config.num_kv_heads,
             config.head_dim,
         )
@@ -53,7 +57,10 @@ class MHATokenToKVPool(TokenToKVPool):
     ) -> None:
         assert 0 <= layer_id < self.config.num_layers, "layer_id out of range"
         assert slot_ids.ndim == 1, "slot_ids must be one-dimensional"
-        assert torch.all((slot_ids >= 0) & (slot_ids < self.config.capacity)), (
+        # Page 0 may receive dummy writes, but is never allocated to requests.
+        assert torch.all(
+            (slot_ids >= 0) & (slot_ids < self.config.capacity + self.config.page_size)
+        ), (
             "allocated slots exceed KV storage capacity"
         )
         expected = (slot_ids.numel(), self.config.num_kv_heads, self.config.head_dim)
@@ -63,11 +70,16 @@ class MHATokenToKVPool(TokenToKVPool):
         self.k_buffer[layer_id, slot_ids, :] = k
         self.v_buffer[layer_id, slot_ids, :] = v
 
-    def get_key_buffer(self, layer_id: int, slot_ids: torch.Tensor) -> torch.Tensor:
-        return self.k_buffer[layer_id, slot_ids, :]
+    def get_key_buffer(self, layer_id: int) -> torch.Tensor:
+        """Return this layer's full K buffer as a view; the backend selects slots."""
+        return self.k_buffer[layer_id]
 
-    def get_value_buffer(self, layer_id: int, slot_ids: torch.Tensor) -> torch.Tensor:
-        return self.v_buffer[layer_id, slot_ids, :]
+    def get_value_buffer(self, layer_id: int) -> torch.Tensor:
+        """Return this layer's full V buffer as a view; the backend selects slots."""
+        return self.v_buffer[layer_id]
+
+    def get_kv_buffer(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
 
 
 class PagedTokenToKVPoolAllocator:
@@ -76,7 +88,8 @@ class PagedTokenToKVPoolAllocator:
         assert num_pages >= 0, "num_pages must be nonnegative"
         self.page_size = page_size
         self.num_pages = num_pages
-        self.free_pages = list[int](range(num_pages))
+        # num_pages counts usable pages; page 0 is reserved.
+        self.free_pages = list[int](range(1, num_pages + 1))
 
     def alloc_extend(
         self, prefix_len: int, seq_len: int, last_loc: int, extend_num_tokens: int
@@ -92,6 +105,18 @@ class PagedTokenToKVPoolAllocator:
             A list of token indices that can be used to set the KV buffer.
             None if the allocation fails.
         """
+        assert seq_len == prefix_len + extend_num_tokens, "sequence length mismatch"
+        assert prefix_len >= 0 and extend_num_tokens >= 0, "lengths must be nonnegative"
+        if prefix_len == 0:
+            assert last_loc == -1, "an empty prefix must use last_loc=-1"
+        else:
+            assert self.page_size <= last_loc < (self.num_pages + 1) * self.page_size, (
+                "last_loc must refer to a usable slot"
+            )
+            assert (last_loc + 1) % self.page_size == prefix_len % self.page_size, (
+                "last_loc does not match the prefix page offset"
+            )
+        
         remain_tokens = self.page_size - last_loc % self.page_size - 1
         remain_tokens_list = list[int](range(last_loc + 1, (last_loc // self.page_size + 1) * self.page_size))
         if extend_num_tokens <= remain_tokens:
@@ -116,7 +141,9 @@ class PagedTokenToKVPoolAllocator:
         """
         page_to_free = set[int]()
         for pos in token_list_pos:
-            assert 0 <= pos < self.num_pages * self.page_size, "slot to free out of range"
+            assert self.page_size <= pos < (self.num_pages + 1) * self.page_size, (
+                "slot to free is reserved or out of range"
+            )
             page_to_free.add(pos // self.page_size)
         assert page_to_free.isdisjoint(self.free_pages), "page already free"
         self.free_pages.extend(page_to_free)

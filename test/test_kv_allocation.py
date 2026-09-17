@@ -280,11 +280,16 @@ def make_storage_case(device, dtype, heads):
             self.skipTest('CUDA unavailable')
         cfg = KVPoolConfig(3, 32, heads, 8, dtype, torch.device(device))
         pool = MHATokenToKVPool(cfg)
-        expected_k = torch.zeros((3, 32, heads, 8), device=device, dtype=dtype)
+        expected_k = torch.zeros((3, cfg.capacity + cfg.page_size, heads, 8), device=device, dtype=dtype)
         expected_v = torch.zeros_like(expected_k)
         # Unwritten memory has no defined value; initialize only for isolation checks.
         pool.k_buffer.zero_()
         pool.v_buffer.zero_()
+        # Full-layer getters share storage; selection now belongs to the caller.
+        layer_k, layer_v = pool.get_kv_buffer(1)
+        self.assertEqual(tuple(layer_k.shape), (cfg.capacity + cfg.page_size, heads, 8))
+        self.assertEqual(layer_k.data_ptr(), pool.k_buffer[1].data_ptr())
+        self.assertEqual(layer_v.data_ptr(), pool.v_buffer[1].data_ptr())
         slots = torch.tensor([28, 12, 15, 13], device=device)
         for layer in range(3):
             k = (torch.arange(4 * heads * 8, device=device).reshape(4, heads, 8) % 31 + layer).to(dtype)
@@ -292,11 +297,13 @@ def make_storage_case(device, dtype, heads):
             pool.set_kv_buffer(layer, slots, k, v)
             expected_k[layer, slots] = k
             expected_v[layer, slots] = v
-            torch.testing.assert_close(pool.get_key_buffer(layer, slots), k, rtol=0, atol=0)
-            torch.testing.assert_close(pool.get_value_buffer(layer, slots), v, rtol=0, atol=0)
+            torch.testing.assert_close(pool.get_key_buffer(layer)[slots], k, rtol=0, atol=0)
+            torch.testing.assert_close(pool.get_value_buffer(layer)[slots], v, rtol=0, atol=0)
         # Overwrite reused slots; untouched slots and layers must remain intact.
         k = torch.full((1, heads, 8), 42, dtype=dtype, device=device)
         pool.set_kv_buffer(1, slots[:1], k, -k)
+        torch.testing.assert_close(layer_k[slots[:1]], k, rtol=0, atol=0)
+        torch.testing.assert_close(layer_v[slots[:1]], -k, rtol=0, atol=0)
         expected_k[1, slots[:1]] = k
         expected_v[1, slots[:1]] = -k
         torch.testing.assert_close(pool.k_buffer, expected_k, rtol=0, atol=0)
@@ -304,7 +311,7 @@ def make_storage_case(device, dtype, heads):
         empty = torch.empty(0, dtype=torch.long, device=device)
         values = torch.empty((0, heads, 8), dtype=dtype, device=device)
         pool.set_kv_buffer(0, empty, values, values)
-        self.assertEqual(tuple(pool.get_key_buffer(0, empty).shape), (0, heads, 8))
+        self.assertEqual(tuple(pool.get_key_buffer(0)[empty].shape), (0, heads, 8))
     return test
 
 
@@ -319,7 +326,7 @@ class IntegrationTests(unittest.TestCase):
     def test_two_requests_do_not_overwrite_each_others_kv(self):
         rows = request_pool(2)
         alloc = PagedTokenToKVPoolAllocator(4, 4)
-        kv = MHATokenToKVPool(KVPoolConfig(2, 20, 3, 8, torch.float32, torch.device('cpu')))
+        kv = MHATokenToKVPool(KVPoolConfig(2, 16, 3, 8, torch.float32, torch.device('cpu'), page_size=4))
         a = rows.alloc_rows(1)[0]
         b = rows.alloc_rows(1)[0]
         sa = torch.tensor(extend(alloc, [], 3))
@@ -331,8 +338,8 @@ class IntegrationTests(unittest.TestCase):
             vb = torch.full((3, 3, 8), 20.0 + layer)
             kv.set_kv_buffer(layer, sa, va, -va)
             kv.set_kv_buffer(layer, sb, vb, -vb)
-            torch.testing.assert_close(kv.get_key_buffer(layer, rows.req_to_token[a, :3]), va)
-            torch.testing.assert_close(kv.get_key_buffer(layer, rows.req_to_token[b, :3]), vb)
+            torch.testing.assert_close(kv.get_key_buffer(layer)[rows.req_to_token[a, :3]], va)
+            torch.testing.assert_close(kv.get_key_buffer(layer)[rows.req_to_token[b, :3]], vb)
 
 
 if __name__ == '__main__':

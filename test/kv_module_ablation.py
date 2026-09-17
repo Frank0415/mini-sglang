@@ -41,7 +41,7 @@ class ModuleHarness:
                 raise Rejected('allocator can address slots outside KV storage')
         self.rows = ReqToTokenPool(ReqToTokenPoolConfig(4, context, torch.device('cpu')))
         self.alloc = PagedTokenToKVPoolAllocator(page_size, pages)
-        self.kv = MHATokenToKVPool(KVPoolConfig(2, capacity, 3, 4, torch.float32, torch.device('cpu')))
+        self.kv = MHATokenToKVPool(KVPoolConfig(2, capacity, 3, 4, torch.float32, torch.device('cpu'), page_size=page_size))
         self.kv.k_buffer.zero_()
         self.kv.v_buffer.zero_()
         self.context = context
@@ -105,8 +105,8 @@ class ModuleHarness:
             indices = self.rows.req_to_token[row, :len(slots)]
             for layer in range(2):
                 expected = self.values(rid, layer, 0, len(slots))
-                assert torch.equal(self.kv.get_key_buffer(layer, indices), expected), 'K corrupted'
-                assert torch.equal(self.kv.get_value_buffer(layer, indices), -expected), 'V corrupted'
+                assert torch.equal(self.kv.get_key_buffer(layer)[indices], expected), 'K corrupted'
+                assert torch.equal(self.kv.get_value_buffer(layer)[indices], -expected), 'V corrupted'
         assert len(occupied) == len(set(occupied)), 'requests share pages'
         assert len(self.alloc.free_pages) == len(set(self.alloc.free_pages)), 'duplicate free pages'
         assert set(occupied).isdisjoint(self.alloc.free_pages), 'live page marked free'
