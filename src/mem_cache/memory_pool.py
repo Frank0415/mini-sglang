@@ -1,6 +1,7 @@
 from dataclasses import dataclass
+
 import torch
-from torch import nn
+
 
 @dataclass
 class ReqToTokenPoolConfig:
@@ -10,6 +11,8 @@ class ReqToTokenPoolConfig:
 
 class ReqToTokenPool:
     def __init__(self,config:ReqToTokenPoolConfig):
+        assert config.total_reqs > 0, "total_reqs must be positive"
+        assert config.max_context_len > 0, "max_context_len must be positive"
         self.config = config
 
         # Only use row 1 - total_reqs, leave 0 for reserved
@@ -19,23 +22,43 @@ class ReqToTokenPool:
             device=config.device,
         )
         # Row number is managed by CPU, mapping content is stored on the specified device
-        self.free_slots = list(range(1, config.total_reqs + 1))
+        self.free_slots = list[int](range(1, config.total_reqs + 1))
 
     def available_slots(self) -> int:
         return len(self.free_slots)
 
     def alloc_rows(self,need_size:int) -> list[int] | None:
-        pass
+        if need_size > self.available_slots():
+            return None
+        alloced_slots = self.free_slots[:need_size]
+        self.free_slots = self.free_slots[need_size:]
+        return alloced_slots
 
     def write(
         self,
         indices: tuple[int, slice],
         values: torch.Tensor,
     ) -> None:
-        pass
+        row, positions = indices
+        assert 1 <= row <= self.config.total_reqs, "request row out of range"
+        start = 0 if positions.start is None else positions.start
+        stop = self.config.max_context_len if positions.stop is None else positions.stop
+        assert positions.step in (None, 1), "request positions must be contiguous"
+        assert 0 <= start <= stop <= self.config.max_context_len, (
+            "request positions exceed max_context_len"
+        )
+        assert values.ndim == 1 and values.numel() == stop - start, (
+            "one slot is required for each request position"
+        )
+        self.req_to_token[indices[0], indices[1]] = values
 
     def free_rows(self,indices:list[int]) -> None:
-        pass
+        assert all(1 <= row <= self.config.total_reqs for row in indices), (
+            "request row to free out of range"
+        )
+        assert len(set(indices)) == len(indices), "duplicate request rows in free"
+        assert set(indices).isdisjoint(self.free_slots), "request row already free"
+        self.free_slots.extend(indices)
 
     def clear(self) -> None:
-        pass
+        self.free_slots = list[int](range(1, self.config.total_reqs + 1))
