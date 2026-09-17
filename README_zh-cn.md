@@ -2,7 +2,7 @@
 
 # 加载模型并进行推理
 
-以 `smollm2-135m-instruct` 为例，展示加载并进行推理的流程。
+以 `smollm2-135m-instruct` 为例，展示加载并进行推理的实现。
 
 ## 模型加载
 
@@ -20,6 +20,13 @@ ModelConfig
 ```
 model_class = ModelRegistry.get_model_class(model_config.architectures)
 model = model_class(model_config.hf_config)
+```
+
+通过 model_loader/weight_utils.py 读取权重文件，并返回权重文件的迭代器，通过 model.load_weights 加载权重。
+
+
+```
+model.load_weights(iter_weights(model_dir))
 ```
 
 ```
@@ -46,7 +53,31 @@ LlamaForCausalLM
 └── LM head
 ```
 
-## 目录结构
+## 推理测试
+
+通过 scripts/check_forward.py 进行推理测试，检查模型是否能够正确加载和推理。
+
+# KV Cache
+
+KV Cache 借鉴了 sglang 的实现，包含请求映射池 `ReqToTokenPool`、槽位分配器 `PagedTokenToKVPoolAllocator`、KV 存储池 `MHATokenToKVPool`。
+
+```
+请求编号 + token 在序列中的位置
+                │
+                ▼
+          ReqToTokenPool
+                │ 查出物理槽位
+                ▼
+         MHATokenToKVPool
+                │
+                ▼
+           对应层的 K、V
+
+TokenToKVPoolAllocator
+    └── 管理哪些物理槽位可以分配、哪些已经归还
+```
+
+# 目录结构
 
 ```
 src/

@@ -22,6 +22,12 @@ model_class = ModelRegistry.get_model_class(model_config.architectures)
 model = model_class(model_config.hf_config)
 ```
 
+`model_loader/weight_utils.py` reads the weight files and provides an iterator over their weights. The model loads these weights through `model.load_weights`:
+
+```python
+model.load_weights(iter_weights(model_dir))
+```
+
 ```text
 HF model directory
 → configs/model_config.py: ModelConfig reads the complete configuration
@@ -46,7 +52,31 @@ LlamaForCausalLM
 └── LM head
 ```
 
-## Directory Structure
+## Inference Testing
+
+Use `scripts/check_forward.py` to test whether the model loads and runs inference correctly.
+
+# KV Cache
+
+The KV cache design draws on SGLang's implementation. It includes a request mapping pool, `ReqToTokenPool`; a paged slot allocator, `PagedTokenToKVPoolAllocator`; and a KV storage pool, `MHATokenToKVPool`.
+
+```text
+Request index + token position in the sequence
+                │
+                ▼
+          ReqToTokenPool
+                │ Look up the physical slot
+                ▼
+         MHATokenToKVPool
+                │
+                ▼
+       K and V for the corresponding layer
+
+TokenToKVPoolAllocator
+    └── Track which physical slots are available and which have been released
+```
+
+# Directory Structure
 
 ```text
 src/
