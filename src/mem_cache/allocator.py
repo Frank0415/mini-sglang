@@ -1,23 +1,26 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 
 import torch
 
 
-@dataclass
-class KVPoolConfig:
-    num_layers: int
-    capacity: int  # Usable token slots, excluding reserved page 0
-    num_kv_heads: int
-    head_dim: int
-    dtype: torch.dtype
-    device: torch.device
-    page_size: int = 1
-
-
 class TokenToKVPool(ABC):
-    def __init__(self, config: KVPoolConfig):
-        self.config = config
+    def __init__(
+        self,
+        num_layers: int,
+        capacity: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        page_size: int = 1,
+    ):
+        self.num_layers = num_layers
+        self.capacity = capacity  # Usable slots, excluding reserved page 0
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.dtype = dtype
+        self.device = device
+        self.page_size = page_size
 
     @abstractmethod
     def set_kv_buffer(
@@ -35,35 +38,44 @@ class TokenToKVPool(ABC):
 
 
 class MHATokenToKVPool(TokenToKVPool):
-    def __init__(self, config: KVPoolConfig):
-        assert config.num_layers > 0, "num_layers must be positive"
-        assert config.capacity >= 0, "capacity must be nonnegative"
-        assert config.page_size > 0, "page_size must be positive"
-        assert config.capacity % config.page_size == 0, "capacity must be page-aligned"
-        assert config.num_kv_heads > 0, "num_kv_heads must be positive"
-        assert config.head_dim > 0, "head_dim must be positive"
-        super().__init__(config)
+    def __init__(
+        self,
+        num_layers: int,
+        capacity: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        page_size: int = 1,
+    ):
+        assert num_layers > 0, "num_layers must be positive"
+        assert capacity >= 0, "capacity must be nonnegative"
+        assert page_size > 0, "page_size must be positive"
+        assert capacity % page_size == 0, "capacity must be page-aligned"
+        assert num_kv_heads > 0, "num_kv_heads must be positive"
+        assert head_dim > 0, "head_dim must be positive"
+        super().__init__(num_layers, capacity, num_kv_heads, head_dim, dtype, device, page_size)
         shape = (
-            config.num_layers,
-            config.capacity + config.page_size,
-            config.num_kv_heads,
-            config.head_dim,
+            num_layers,
+            capacity + page_size,
+            num_kv_heads,
+            head_dim,
         )
-        self.k_buffer = torch.empty(shape, dtype=config.dtype, device=config.device)
-        self.v_buffer = torch.empty(shape, dtype=config.dtype, device=config.device)
+        self.k_buffer = torch.empty(shape, dtype=dtype, device=device)
+        self.v_buffer = torch.empty(shape, dtype=dtype, device=device)
 
     def set_kv_buffer(
         self, layer_id: int, slot_ids: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> None:
-        assert 0 <= layer_id < self.config.num_layers, "layer_id out of range"
+        assert 0 <= layer_id < self.num_layers, "layer_id out of range"
         assert slot_ids.ndim == 1, "slot_ids must be one-dimensional"
         # Page 0 may receive dummy writes, but is never allocated to requests.
         assert torch.all(
-            (slot_ids >= 0) & (slot_ids < self.config.capacity + self.config.page_size)
+            (slot_ids >= 0) & (slot_ids < self.capacity + self.page_size)
         ), (
             "allocated slots exceed KV storage capacity"
         )
-        expected = (slot_ids.numel(), self.config.num_kv_heads, self.config.head_dim)
+        expected = (slot_ids.numel(), self.num_kv_heads, self.head_dim)
         # Check both tensors before either write, including broadcastable shapes.
         assert tuple(k.shape) == expected, f"K shape must be {expected}"
         assert tuple(v.shape) == expected, f"V shape must be {expected}"
