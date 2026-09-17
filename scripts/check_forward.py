@@ -8,8 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-from src.model_loader.loader import load_model
-from src.layers.attention.torch_backend import TorchAttnBackend
+from src.model_executor.model_runner import ModelRunner
 
 DEFAULT_MODEL_DIR = PROJECT_ROOT / (
     "models/smollm2-135m-instruct/"
@@ -66,11 +65,8 @@ def main():
         raise RuntimeError("This check requires CUDA for the local flash attention backend")
     torch.manual_seed(0)
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
-    backend = TorchAttnBackend()
-    model = load_model(
-        args.model_dir, device="cuda", dtype=torch.bfloat16, attn_backend=backend
-    )
-    assert all(layer.self_attn.backend is backend for layer in model.model.layers)
+    runner = ModelRunner(args.model_dir, device="cuda")
+    model = runner.model
     reference = AutoModelForCausalLM.from_pretrained(
         args.model_dir,
         local_files_only=True,
@@ -97,7 +93,7 @@ def main():
             return_tensors="pt",
             return_dict=False,
         ).to("cuda")
-        actual = model(input_ids)
+        actual = runner.forward(input_ids)
         expected = hf_forward(reference, input_ids)
         shape = (*input_ids.shape, model.config.vocab_size)
         if tuple(actual.shape) != shape or tuple(expected.shape) != shape:
@@ -117,7 +113,7 @@ def main():
             failures.append(f"prompt {index}: logits exceed tolerance")
         if not next_match:
             failures.append(f"prompt {index}: next token differs")
-        actual_ids = greedy(model, input_ids, args.max_new_tokens, eos_ids)
+        actual_ids = greedy(runner.forward, input_ids, args.max_new_tokens, eos_ids)
         expected_ids = greedy(lambda ids: hf_forward(reference, ids), input_ids,
                               args.max_new_tokens, eos_ids)
         print(f"Local token IDs: {actual_ids}")

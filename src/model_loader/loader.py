@@ -5,13 +5,11 @@ from torch import nn
 
 from ..configs.model_config import ModelConfig
 from ..models.registry import ModelRegistry
-from ..layers.attention.torch_backend import TorchAttnBackend
 from .weight_utils import iter_weights
 
 
 def load_model(
     model_dir: str | Path,
-    attn_backend: TorchAttnBackend,
     model_config: ModelConfig,
     device: str = "cuda",
     dtype: torch.dtype | None = None,
@@ -25,11 +23,10 @@ def load_model(
         dtype = getattr(model_config.hf_config, "dtype", None)
 
     model_class = ModelRegistry.get_model_class(model_config.architectures)
-    model = model_class(model_config.hf_config, attn_backend=attn_backend)
+    model = model_class(model_config.hf_config)
 
     model = model.to(dtype=dtype)
     model.load_weights(iter_weights(model_dir))
-
     model = model.to(device=device)
     model.eval()
 

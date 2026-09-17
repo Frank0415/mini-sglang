@@ -5,34 +5,35 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import LlamaConfig
 
-from ..layers.attention.torch_backend import TorchAttnBackend
+from ..model_executor.forward_batch_info import ForwardContext
 from ..layers.layers import Embedding, LMhead, RMSNorm
 from ..layers.rotary_embedding import apply_rope
-from ..mem_cache.cache_spec import PagedKVSpec
+from ..mem_cache.cache_spec import PagedKVSpec, CacheSpec
 
 
 class LlamaForCausalLM(nn.Module):
     model: nn.Module
     lm_head: nn.Module
 
-    def __init__(self, config: LlamaConfig, attn_backend: TorchAttnBackend):
+    def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config, attn_backend)
+        self.model = LlamaModel(config)
         self.lm_head = LMhead(config)
 
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None,
+        context: ForwardContext,
     ) -> torch.Tensor:
         """
         input_ids: [batch_size, seq_len]
         position_ids: [batch_size, seq_len]
-        return: [batch_size, seq_len, hidden_size]
+        return: [batch_size, seq_len, vocab_size]
         """
-        hidden_states = self.model(input_ids, position_ids)
+        hidden_states = self.model(input_ids, position_ids, context=context)
         return self.lm_head(hidden_states)
 
     @torch.no_grad()
@@ -91,18 +92,19 @@ class LlamaModel(nn.Module):
     layers: nn.ModuleList
     norm: nn.Module
 
-    def __init__(self, config: LlamaConfig, attn_backend: TorchAttnBackend):
+    def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config = config
         self.embed_tokens = Embedding(config)
         self.layers = nn.ModuleList(
-            LlamaDecoderLayer(config, attn_backend)
-            for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, layer_id=i)
+            for i in range(config.num_hidden_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
     def forward(
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None,
+        context: ForwardContext,
     ) -> torch.Tensor:
         """
         input_ids: [batch_size, seq_len]
@@ -119,7 +121,7 @@ class LlamaModel(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
 
         for layer in self.layers:
-            hidden_states = layer(hidden_states, position_ids)
+            hidden_states = layer(hidden_states, position_ids, context=context)
 
         return self.norm(hidden_states)
 
@@ -130,11 +132,11 @@ class LlamaDecoderLayer(nn.Module):
     post_attention_layernorm: nn.Module
     mlp: nn.Module
 
-    def __init__(self, config: LlamaConfig, attn_backend: TorchAttnBackend):
+    def __init__(self, config: LlamaConfig, layer_id: int):
         super().__init__()
 
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.self_attn = LlamaAttn(config, attn_backend)
+        self.self_attn = LlamaAttn(config, layer_id=layer_id)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = LlamaMLP(config)
 
@@ -142,10 +144,11 @@ class LlamaDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
+        context: ForwardContext,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, position_ids)
+        hidden_states = self.self_attn(hidden_states, position_ids, context=context)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -180,8 +183,9 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaAttn(nn.Module):
-    def __init__(self, config: LlamaConfig, attn_backend: TorchAttnBackend):
+    def __init__(self, config: LlamaConfig, layer_id: int):
         super().__init__()
+        self.layer_id = layer_id
 
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -212,9 +216,11 @@ class LlamaAttn(nn.Module):
             config.hidden_size,
             bias=config.attention_bias,
         )
-        self.backend = attn_backend
 
-    def forward(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
+    def forward(
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor,
+        context: ForwardContext,
+    ):
         batch_size, seq_len, _ = hidden_states.shape
         q = (
             self.q_proj(hidden_states)
@@ -236,7 +242,16 @@ class LlamaAttn(nn.Module):
 
         q, k = apply_rope(q, k, position_ids, self.rope_theta)
 
-        output = self.backend(q, k, v)
+        binding = context.runtime.layers[self.layer_id]
+        group, local_layer_id = context.runtime.find_layer(self.layer_id)
+        cache_batch = context.batch.cache_batches.get(binding.group_id)
+        
+        output = group.backend(
+            q, k, v,
+            layer_id=local_layer_id,
+            batch=context.batch,
+            cache_batch=cache_batch,
+        )
         output = output.transpose(1, 2).reshape(
             batch_size, seq_len, self.num_heads * self.head_dim
         )
