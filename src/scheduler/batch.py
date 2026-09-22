@@ -3,13 +3,13 @@ from dataclasses import dataclass
 import torch
 
 from ..model_executor.forward_batch_info import (
+    ForwardBatch,
     ForwardContext,
     ForwardMode,
     PagedKVBatch,
-    ForwardBatch,
 )
-from .request import Request
 from ..model_executor.model_runner import ModelRunner
+from .request import Request
 
 
 @dataclass
