@@ -6,6 +6,7 @@ here can instead be addressed by an explicit caller-side precondition.
 All malformed indexing probes run on CPU, never CUDA.
 """
 import unittest
+
 import torch
 
 from src.mem_cache.allocator import MHATokenToKVPool, PagedTokenToKVPoolAllocator

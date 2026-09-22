@@ -10,7 +10,8 @@ import unittest
 import torch
 
 from src.mem_cache.allocator import (
-    MHATokenToKVPool, PagedTokenToKVPoolAllocator,
+    MHATokenToKVPool,
+    PagedTokenToKVPoolAllocator,
 )
 from src.mem_cache.memory_pool import ReqToTokenPool
 
