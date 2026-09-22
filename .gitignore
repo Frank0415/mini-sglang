@@ -6,3 +6,5 @@ models/
 
 test/*
 !test/*.py
+
+docs/diagrams/*
