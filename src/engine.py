@@ -17,7 +17,7 @@ class Engine:
         device: str = "cuda",
     ):
         self.runner = ModelRunner(model_dir, device)
-        self.scheduler = Scheduler()
+        self.scheduler = Scheduler(self.runner)
 
     def add_request(
         self,
@@ -44,6 +44,7 @@ class Engine:
         requests = self.scheduler.get_next_requests()
         if not requests:
             return
+        request = requests[0]
         try:
             batch = ScheduleBatch.prepare(requests, self.runner)
 
@@ -60,14 +61,14 @@ class Engine:
             self.scheduler.process_result(batch, token_id)
 
         except Exception:
-            self.scheduler.abort(requests.request_id)
+            self.scheduler.abort(request.request_id)
             raise
 
         return {
-            "request_id": requests.request_id,
+            "request_id": request.request_id,
             "token_id": token_id,
-            "finished": requests.status == RequestStatus.FINISHED,
-            "finish_reason": requests.finish_reason,
+            "finished": request.status == RequestStatus.FINISHED,
+            "finish_reason": request.finish_reason,
         }
 
     def abort(self, request_id: str):
@@ -93,4 +94,4 @@ class Engine:
         ):
             self.step()
 
-        return self.take_result(request_id)
+        return self.free_request(request_id)
