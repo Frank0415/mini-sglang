@@ -60,6 +60,7 @@ class ScheduleBatch:
         )
 
         if new_slots is None:
+            # Added later by debugging scheduler:
             # The scheduler owns cleanup. In particular, do not detach an
             # existing row from a running request that still owns historical KV.
             raise ValueError(
