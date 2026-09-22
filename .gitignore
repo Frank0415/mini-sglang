@@ -9,3 +9,6 @@ test/*
 
 docs/diagrams/*
 docs/*
+scripts/*
+!scripts/check_forward.py
+!scripts/download_model.py
