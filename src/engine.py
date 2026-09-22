@@ -38,6 +38,9 @@ class Engine:
 
     @torch.inference_mode()
     def step(self):
+        """
+        Do one step of inference, return none when nothing to do.
+        """
         requests = self.scheduler.get_next_requests()
         if not requests:
             return
@@ -66,3 +69,28 @@ class Engine:
             "finished": requests.status == RequestStatus.FINISHED,
             "finish_reason": requests.finish_reason,
         }
+
+    def abort(self, request_id: str):
+        self.scheduler.abort(request_id)
+
+    def free_request(self, request_id: str):
+        return self.scheduler.return_request_result(request_id)
+
+    def generate(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int,
+    ) -> Request:
+        """
+        Generate text until the request is finished.
+        """
+        request_id = self.add_request(input_ids, max_new_tokens)
+        request = self.scheduler.requests[request_id]
+
+        while request.status not in (
+            RequestStatus.FINISHED,
+            RequestStatus.ABORTED,
+        ):
+            self.step()
+
+        return self.take_result(request_id)
