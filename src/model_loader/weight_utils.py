@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
+
 def iter_weights(model_dir: str|Path) -> Iterator[tuple[str, torch.Tensor]]:
     model_dir = Path(model_dir)
     index_path = model_dir / "model.safetensors.index.json"

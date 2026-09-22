@@ -1,6 +1,8 @@
 from dataclasses import dataclass
-from transformers import PretrainedConfig,AutoConfig
 from pathlib import Path
+
+from transformers import AutoConfig, PretrainedConfig
+
 
 @dataclass
 class ModelConfig:

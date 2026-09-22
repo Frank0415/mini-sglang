@@ -3,8 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from ...mem_cache.memory_pool import ReqToTokenPool
 from ...mem_cache.allocator import TokenToKVPool
+from ...mem_cache.memory_pool import ReqToTokenPool
 
 """
 Old implementation:

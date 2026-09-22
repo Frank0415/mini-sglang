@@ -1,5 +1,7 @@
-from .llama import LlamaForCausalLM
 from dataclasses import dataclass
+
+from .llama import LlamaForCausalLM
+
 
 @dataclass
 class ModelRegistry:

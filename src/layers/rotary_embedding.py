@@ -1,5 +1,6 @@
 import torch
 
+
 def apply_rope(
     q: torch.Tensor,
     k: torch.Tensor,
