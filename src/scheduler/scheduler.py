@@ -96,4 +96,11 @@ class Scheduler:
             request.req_pool_index = None
         request.cached_len = 0
 
-
+    def return_request_result(self, request_id: str) -> Request:
+        """
+        Return the request result to the scheduler, freeing the request.
+        """
+        request = self.requests[request_id]
+        if request.status != RequestStatus.FINISHED:
+            raise ValueError("Request is not finished")
+        return self.requests.pop(request_id)
