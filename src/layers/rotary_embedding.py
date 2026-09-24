@@ -9,9 +9,9 @@ def apply_rope(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply standard, non-interleaved Llama RoPE to Q and K.
-    q: [batch, query_heads, seq_len, head_dim]
-    k: [batch, kv_heads, seq_len, head_dim]
-    position_ids: [batch, seq_len], on the same device as Q and K.
+    q: [total_tokens, query_heads, seq_len, head_dim]
+    k: [total_tokens, kv_heads, seq_len, head_dim]
+    position_ids: [total_tokens], on the same device as Q and K.
     """
     head_dim = q.shape[-1]
     dim_indices = torch.arange(

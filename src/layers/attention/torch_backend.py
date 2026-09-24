@@ -52,8 +52,8 @@ class TorchAttnBackend(nn.Module):
         cache_batch,
     ):
         """
-        q: [batch, query_heads, seq_len, head_dim]
-        k/v: [batch, kv_heads, seq_len, head_dim]
+        q: [total_tokens, query_heads, seq_len, head_dim]
+        k/v: [total_tokens, kv_heads, seq_len, head_dim]
 
         batch: Execution Mode, seq_lens, extend_lens
         cache_batch: indices of the req_pool and the location of the cache slot
@@ -66,69 +66,71 @@ class TorchAttnBackend(nn.Module):
         attn_mask = None
         is_causal = True
 
+        # 1. set the kv buffer using the new k and v
+        # The output cache location is the location of the cache slot in the token to kv pool
+        # output cache location is passed in by cache_batch, constructed by the allocator
         if cache_batch is not None:
-            if q.shape[0] != 1:
-                raise ValueError("Cached attention currently requires batch=1")
-            
-            # 1. calculate the input and total length
-            input_len = q.shape[2]
-            total_len = batch.seq_lens_cpu[0]
-            prefix_len = total_len - input_len
-
-            # 2. update the kv buffer's size:
-            # [1, heads, tokens, dim] → [tokens, heads, dim]
-            new_k = k[0].transpose(0, 1)
-            new_v = v[0].transpose(0, 1)
-
-            # 3. set the kv buffer using the new k and v
-            # The output cache location is the location of the cache slot in the token to kv pool
-            # output cache location is passed in by cache_batch, constructed by the allocator
             self.token_to_kv_pool.set_kv_buffer(
                 layer_id,
                 cache_batch.out_cache_loc,
-                new_k,
-                new_v,
-            )
-
-            # 4. get the kv buffer from the token to kv pool
-            # slots are the physical location of the kv buffer in the token to kv pool
-            row = cache_batch.req_pool_indices_cpu[0]
-            slots = self.req_to_token_pool.req_to_token[row, :total_len]
-
-            # get the actual cache of the prev k and v
-            k_buffer, v_buffer = self.token_to_kv_pool.get_kv_buffer(layer_id)
-
-            
-            # [tokens, heads, dim] → [1, heads, tokens, dim]
-            k = k_buffer[slots].transpose(0, 1).unsqueeze(0)
-            v = v_buffer[slots].transpose(0, 1).unsqueeze(0)
-
-            if prefix_len > 0:
-                is_causal = False
-
-                # For example query positions [1,2], key [0,1,2]
-                # the attn_mask is [[True, True, False], [True, True, True]] as 2 > 1
-                if input_len > 1:
-                    query_positions = (
-                        prefix_len
-                        + torch.arange(input_len, device=q.device)
-                    )
-                    key_positions = torch.arange(total_len, device=q.device)
-
-                    attn_mask = (
-                        key_positions[None, :] <= query_positions[:, None]
-                    )
-
-        with sdpa_kernel([
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-        ]):
-            return F.scaled_dot_product_attention(
-                q,
                 k,
                 v,
-                attn_mask=attn_mask,
-                dropout_p=0.0,
-                is_causal=is_causal,
-                enable_gqa=True,
             )
+            k_buffer, v_buffer = self.token_to_kv_pool.get_kv_buffer(layer_id)
+
+        # 2. allocate the output tensor
+        output = torch.empty_like(q)
+        offsets = batch.query_offsets_cpu
+
+        for i, total_len in enumerate(batch.seq_lens_cpu):
+            start, end = offsets[i], offsets[i + 1]
+            input_len = end - start
+            prefix_len = total_len - input_len
+
+            request_q = q[start:end]
+
+            # 3. get the kv buffer from the token to kv pool
+            # slots are the physical location of the kv buffer in the token to kv pool
+            if cache_batch is not None:
+                row = cache_batch.req_pool_indices_cpu[i]
+                slots = self.req_to_token_pool.req_to_token[row, :total_len]
+                request_k = k_buffer[slots]
+                request_v = v_buffer[slots]
+            else:
+                request_k = k[start:end]
+                request_v = v[start:end]
+
+            # [tokens, heads, D] → [1, heads, tokens, D]
+            request_q = request_q.transpose(0, 1).unsqueeze(0)
+            request_k = request_k.transpose(0, 1).unsqueeze(0)
+            request_v = request_v.transpose(0, 1).unsqueeze(0)
+
+            attn_mask = None
+            is_causal = prefix_len == 0
+
+            if prefix_len > 0 and input_len > 1:
+                query_positions = prefix_len + torch.arange(
+                    input_len, device=q.device
+                )
+                key_positions = torch.arange(total_len, device=q.device)
+                attn_mask = (
+                    key_positions[None, :] <= query_positions[:, None]
+                )
+
+            with sdpa_kernel([
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+            ]):
+                request_output = F.scaled_dot_product_attention(
+                    request_q,
+                    request_k,
+                    request_v,
+                    attn_mask=attn_mask,
+                    is_causal=is_causal,
+                    dropout_p=0.0,
+                    enable_gqa=True,
+                )
+
+            output[start:end] = request_output.squeeze(0).transpose(0, 1)
+
+        return output
