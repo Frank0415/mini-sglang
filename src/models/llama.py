@@ -25,13 +25,13 @@ class LlamaForCausalLM(nn.Module):
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
         context: ForwardContext,
     ) -> torch.Tensor:
         """
-        input_ids: [batch_size, seq_len]
-        position_ids: [batch_size, seq_len]
-        return: [batch_size, seq_len, vocab_size]
+        input_ids: [total_tokens], concatenated in request order
+        position_ids: [total_tokens], positions within each original sequence
+        return: [total_tokens, vocab_size]
         """
         hidden_states = self.model(input_ids, position_ids, context=context)
         return self.lm_head(hidden_states)
@@ -103,21 +103,14 @@ class LlamaModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
     def forward(
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
         context: ForwardContext,
     ) -> torch.Tensor:
         """
-        input_ids: [batch_size, seq_len]
-        position_ids: [batch_size, seq_len]
-        return: [batch_size, seq_len, hidden_size]
+        input_ids: [total_tokens]
+        position_ids: [total_tokens]
+        return: [total_tokens, hidden_size]
         """
-        batch_size, seq_len = input_ids.shape
-
-        if position_ids is None:
-            position_ids = torch.arange(
-                seq_len, device=input_ids.device
-            ).unsqueeze(0).expand(batch_size, -1)
-
         hidden_states = self.embed_tokens(input_ids)
 
         for layer in self.layers:
@@ -221,23 +214,15 @@ class LlamaAttn(nn.Module):
         self, hidden_states: torch.Tensor, position_ids: torch.Tensor,
         context: ForwardContext,
     ):
-        batch_size, seq_len, _ = hidden_states.shape
-        q = (
-            self.q_proj(hidden_states)
-            .view(batch_size, seq_len, self.num_heads, self.head_dim)
-            .transpose(1, 2)
+        num_tokens = hidden_states.shape[0]
+        q = self.q_proj(hidden_states).view(
+            num_tokens, self.num_heads, self.head_dim
         )
-
-        k = (
-            self.k_proj(hidden_states)
-            .view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-            .transpose(1, 2)
+        k = self.k_proj(hidden_states).view(
+            num_tokens, self.num_kv_heads, self.head_dim
         )
-
-        v = (
-            self.v_proj(hidden_states)
-            .view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-            .transpose(1, 2)
+        v = self.v_proj(hidden_states).view(
+            num_tokens, self.num_kv_heads, self.head_dim
         )
 
         q, k = apply_rope(q, k, position_ids, self.rope_theta)
@@ -252,8 +237,8 @@ class LlamaAttn(nn.Module):
             batch=context.batch,
             cache_batch=cache_batch,
         )
-        output = output.transpose(1, 2).reshape(
-            batch_size, seq_len, self.num_heads * self.head_dim
+        output = output.reshape(
+            num_tokens, self.num_heads * self.head_dim
         )
 
         return self.o_proj(output)

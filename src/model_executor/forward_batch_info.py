@@ -46,6 +46,17 @@ class ForwardBatch:
         """
         return tuple(self.seq_lens.tolist())
 
+    @cached_property
+    def extend_lens_cpu(self) -> tuple[int, ...]:
+        return tuple(self.extend_lens.tolist())
+    
+    @cached_property
+    def query_offsets_cpu(self) -> tuple[int, ...]:
+        offsets = [0]
+        for len in self.extend_lens_cpu:
+            offsets.append(offsets[-1] + len)
+        return tuple(offsets)
+
 
 @dataclass
 class ForwardContext:
