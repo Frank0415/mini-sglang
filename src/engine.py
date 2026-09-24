@@ -15,9 +15,10 @@ class Engine:
         self,
         model_dir: str | Path,
         device: str = "cuda",
+        max_batch_size: int = 4,
     ):
         self.runner = ModelRunner(model_dir, device)
-        self.scheduler = Scheduler(self.runner)
+        self.scheduler = Scheduler(self.runner, max_batch_size=max_batch_size)
 
     def add_request(
         self,
@@ -44,7 +45,6 @@ class Engine:
         requests = self.scheduler.get_next_requests()
         if not requests:
             return
-        request = requests[0]
         try:
             batch = ScheduleBatch.prepare(requests, self.runner)
 
@@ -54,22 +54,24 @@ class Engine:
                 context=batch.context,
             )
 
-            # logits: (batch_size, num_tokens, vocab_size)
-            # logits[:, -1, :]: (batch_size, vocab_size)
-            # token_id: (batch_size)
-            token_id = greedy_sample(logits[:, -1, :]).item()
-            self.scheduler.process_result(batch, token_id)
+            # logits: (total_tokens, vocab_size)
+            # logits[last_indices]: (batch_size, vocab_size)
+            # token_ids: (batch_size)
+            last_indices = batch.context.batch.extend_lens.cumsum(0) - 1
+            token_ids = greedy_sample(logits[last_indices]).tolist()
+            self.scheduler.process_result(batch, token_ids)
 
         except Exception:
-            self.scheduler.abort(request.request_id)
+            for request in requests:
+                self.scheduler.abort(request.request_id)
             raise
 
-        return {
+        return [{
             "request_id": request.request_id,
             "token_id": token_id,
             "finished": request.status == RequestStatus.FINISHED,
             "finish_reason": request.finish_reason,
-        }
+        } for request, token_id in zip(requests, token_ids)]
 
     def abort(self, request_id: str):
         self.scheduler.abort(request_id)
@@ -85,13 +87,20 @@ class Engine:
         """
         Generate text until the request is finished.
         """
-        request_id = self.add_request(input_ids, max_new_tokens)
-        request = self.scheduler.requests[request_id]
+        return self.generate_batch([input_ids], max_new_tokens)[0]
 
-        while request.status not in (
+    def generate_batch(
+        self,
+        input_ids: list[list[int]],
+        max_new_tokens: int,
+    ) -> list[Request]:
+        request_ids = [self.add_request(ids, max_new_tokens) for ids in input_ids]
+        requests = [self.scheduler.requests[request_id] for request_id in request_ids]
+
+        while any(request.status not in (
             RequestStatus.FINISHED,
             RequestStatus.ABORTED,
-        ):
+        ) for request in requests):
             self.step()
 
-        return self.free_request(request_id)
+        return [self.free_request(request_id) for request_id in request_ids]

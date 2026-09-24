@@ -11,10 +11,11 @@ if TYPE_CHECKING:
 
 
 class Scheduler:
-    def __init__(self, runner: "ModelRunner"):
+    def __init__(self, runner: "ModelRunner", max_batch_size: int = 1):
         self.runner = runner
+        self.max_batch_size = max_batch_size
         self.waiting: deque[Request] = deque()
-        self.running: Request | None = None
+        self.running: list[Request] = []
         # Keep completed results accessible by request ID.
         self.requests: dict[str, Request] = {}
         eos = runner.model_config.hf_config.eos_token_id
@@ -33,43 +34,47 @@ class Scheduler:
         self.waiting.append(request)
 
     def get_next_requests(self) -> list[Request]:
-        if self.running is not None:
-            return [self.running]
-        while self.waiting:
+        if self.running:
+            return self.running.copy()
+        while self.waiting and len(self.running) < self.max_batch_size:
             request = self.waiting.popleft()
             if request.status != RequestStatus.WAITING:
                 continue  # A waiting request may have been cancelled.
             request.status = RequestStatus.RUNNING
-            self.running = request
-            return [request]
-        return []
+            self.running.append(request)
+        return self.running.copy()
 
-    def process_result(self, batch: ScheduleBatch, token_id: int | torch.Tensor) -> None:
+    def process_result(self, batch: ScheduleBatch, token_ids: list[int] | torch.Tensor) -> None:
         """
         Called after successful forward and sampling. 
         Do not call with raw logits.
         """
-        if batch.requests != [self.running]:
+        if len(batch.requests) != len(self.running) or any(
+            self.requests.get(request.request_id) is not request or request is not running
+            for request, running in zip(batch.requests, self.running)
+        ):
             raise ValueError("Result does not belong to the running request")
-        request = self.running
-        if isinstance(token_id, torch.Tensor):
-            token_id = int(token_id.item())
-        total_len = int(batch.context.batch.seq_lens[0].item())
-        if request.cached_len + batch.input_len != total_len:
-            raise ValueError("Batch result is stale or has already been processed")
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+        total_lens = batch.context.batch.seq_lens_cpu
+        input_lens = batch.context.batch.extend_lens_cpu
+        for request, input_len, total_len in zip(batch.requests, input_lens, total_lens):
+            if request.cached_len + input_len != total_len:
+                raise ValueError("Batch result is stale or has already been processed")
 
-        request.cached_len = total_len
-        request.output_ids.append(token_id)
-        if token_id in self.eos_token_ids:
-            request.finish_reason = "eos"
-        elif len(request.output_ids) >= request.max_new_tokens:
-            request.finish_reason = "length"
-        else:
-            return  # Keep this request running for its next decode.
+        for request, total_len, token_id in zip(batch.requests, total_lens, token_ids):
+            request.cached_len = total_len
+            request.output_ids.append(token_id)
+            if token_id in self.eos_token_ids:
+                request.finish_reason = "eos"
+            elif len(request.output_ids) >= request.max_new_tokens:
+                request.finish_reason = "length"
+            else:
+                continue  # Keep this request running for its next decode.
 
-        request.status = RequestStatus.FINISHED
-        self._release(request)
-        self.running = None
+            request.status = RequestStatus.FINISHED
+            self._release(request)
+        self.running = [request for request in self.running if request.status == RequestStatus.RUNNING]
 
     def abort(self, request_id: str) -> None:
         request = self.requests[request_id]
@@ -78,8 +83,7 @@ class Scheduler:
         self._release(request)
         request.status = RequestStatus.ABORTED
         request.finish_reason = "aborted"
-        if self.running is request:
-            self.running = None
+        self.running = [running for running in self.running if running is not request]
 
     def _release(self, request: Request) -> None:
         """
