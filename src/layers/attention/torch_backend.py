@@ -72,7 +72,7 @@ class TorchAttnBackend(nn.Module):
             
             # 1. calculate the input and total length
             input_len = q.shape[2]
-            total_len = int(batch.seq_lens[0].item())
+            total_len = batch.seq_lens_cpu[0]
             prefix_len = total_len - input_len
 
             # 2. update the kv buffer's size:
@@ -92,7 +92,7 @@ class TorchAttnBackend(nn.Module):
 
             # 4. get the kv buffer from the token to kv pool
             # slots are the physical location of the kv buffer in the token to kv pool
-            row = int(cache_batch.req_pool_indices[0].item())
+            row = cache_batch.req_pool_indices_cpu[0]
             slots = self.req_to_token_pool.req_to_token[row, :total_len]
 
             # get the actual cache of the prev k and v
