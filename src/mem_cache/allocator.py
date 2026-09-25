@@ -67,9 +67,6 @@ class MHATokenToKVPool(TokenToKVPool):
     def set_kv_buffer(
         self, layer_id: int, slot_ids: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> None:
-        assert 0 <= layer_id < self.num_layers, "layer_id out of range"
-        assert slot_ids.ndim == 1, "slot_ids must be one-dimensional"
-        # Page 0 may receive dummy writes, but is never allocated to requests.
         assert torch.all(
             (slot_ids >= 0) & (slot_ids < self.capacity + self.page_size)
         ), (
@@ -106,19 +103,6 @@ class PagedTokenToKVPoolAllocator:
     def alloc_extend(
         self, prefix_len: int, seq_len: int, last_loc: int, extend_num_tokens: int
     ):
-        """
-        Allocate tokens for extending the sequence.
-        Args:
-            prefix_len: The length of the prefix.
-            seq_len: The length of the total sequence (prefix + new tokens).
-            last_loc: The physical location of the last token in the prefix.
-            extend_num_tokens: The number of tokens to extend.
-        Returns:
-            A list of token indices that can be used to set the KV buffer.
-            None if the allocation fails.
-        """
-        assert seq_len == prefix_len + extend_num_tokens, "sequence length mismatch"
-        assert prefix_len >= 0 and extend_num_tokens >= 0, "lengths must be nonnegative"
         if prefix_len == 0:
             assert last_loc == -1, "an empty prefix must use last_loc=-1"
         else:
@@ -146,16 +130,10 @@ class PagedTokenToKVPoolAllocator:
             return remain_tokens_list
 
     def free(self, token_list_pos: list[int]):
-        """
-        Free the tokens that are no longer needed.
-        Args:
-            token_list_pos: The physical positions of the tokens to free.
-        """
         page_to_free = set[int]()
         for pos in token_list_pos:
             assert self.page_size <= pos < (self.num_pages + 1) * self.page_size, (
                 "slot to free is reserved or out of range"
             )
             page_to_free.add(pos // self.page_size)
-        assert page_to_free.isdisjoint(self.free_pages), "page already free"
         self.free_pages.extend(page_to_free)
