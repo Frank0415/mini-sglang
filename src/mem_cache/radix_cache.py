@@ -8,7 +8,7 @@ from .allocator import PagedTokenToKVPoolAllocator
 from .memory_pool import ReqToTokenPool
 from ..scheduler.request import Request
 from time import monotonic_ns
-
+import heapq
 
 @dataclass(eq=False)
 class TreeNode:
@@ -142,10 +142,17 @@ class RadixCache:
         return middle
 
     def inc_lock_ref(self, node: TreeNode):
-        pass
+        while node is not None and node is not self.root_node:
+            node.lock_ref += 1
+            self._refresh_leaf(node)
+            node = node.parent
+
 
     def dec_lock_ref(self, node: TreeNode):
-        pass
+        while node is not None and node is not self.root_node:
+            node.lock_ref -= 1
+            self._refresh_leaf(node)
+            node = node.parent
 
     def refresh_leaf(self, node: TreeNode) -> None:
         if(
@@ -153,24 +160,124 @@ class RadixCache:
         ):
             self.evictable_nodes.add(node)
 
-    def free_node(self, node: TreeNode) -> None:
+    def free_node(self, node: TreeNode) -> int:
         parent = node.parent
-        parent.children.pop(tuple(node.key[:self.page_size]))
+        released = len(node.key)
+
+        self.token_to_kv_pool_allocator.free(node.value.tolist())
+        del parent.children[tuple(node.key[:self.page_size])]
         self.refresh_leaf(parent)
         self.evictable_nodes.discard(node)
+        node.parent = None
 
-    def evict(self, num_tokens: int):
-        pass
+        self.refresh_leaf(parent)
+        return released
+
+    def evict(self, num_tokens: int) -> int:
+        candidates = [
+            (node.last_accessed,node.node_id, node) for node in self.evictable_nodes
+        ]
+
+        heapq.heapify(candidates)
+
+        released = 0
+
+        while candidates and released < num_tokens:
+            _, _, node = heapq.heappop(candidates)
+            parent = node.parent
+
+            released += self.free_node(node)
+
+            if parent in self.evictable_leaves:
+                heapq.heappush(candidates, (parent.last_accessed, parent.node_id, parent))
+
+        return released
 
     def cache_unfinished_requests(self, req: Request):
         """
         Cache the unfinished requests to the radix cache.
         This will be called when the request is not finished.
         """
+        aligned_len = (
+            req.cached_len // self.page_size * self.page_size
+        )
 
-    def cache_finished_requests(self, req: Request):
+        token_ids = (
+            req.input_ids + req.output_ids
+        )[:aligned_len]
+
+        old_protected_len = req.cache_protected_len
+        old_node = req.last_node
+
+        values = torch.tensor(
+            req.slots[:aligned_len],
+            dtype=torch.int64,
+            device=self.req_to_token_pool.req_to_token.device,
+        )
+
+        inserted = self.insert(token_ids, values)
+        matched = self.match_prefix(token_ids)
+
+        duplicate_slots = req.slots[
+            old_protected_len : inserted.prefix_len
+        ]
+
+        self.inc_lock_ref(matched.last_match_node)
+
+        req.slots[:aligned_len] = matched.indices.tolist()
+
+        self.req_to_token_pool.write(
+            (req.req_pool_index, slice(0, aligned_len)),
+            matched.indices,
+        )
+
+        self.dec_lock_ref(old_node)
+
+        self.token_to_kv_pool_allocator.free(duplicate_slots)
+
+        req.cache_protected_len = aligned_len
+        req.last_node = matched.last_match_node
+        
+    def cache_finished_requests(self, req: Request, is_insert: bool = True):
         """
         Cache the finished requests to the radix cache.
         This will be called when the request is finished.
         This will free the protection of the tree nodes and other resources.
         """
+        protected_len = req.cache_protected_len
+
+        if is_insert:
+            aligned_len = (
+                req.cached_len // self.page_size * self.page_size
+            )
+
+            token_ids = (
+                req.input_ids + req.output_ids
+            )[:aligned_len]
+
+            values = torch.tensor(
+                req.slots[:aligned_len],
+                dtype=torch.int64,
+                device=self.req_to_token_pool.req_to_token.device,
+            )
+
+            inserted = self.insert(token_ids, values)
+
+            prompt_len = min(len(req.input_ids), aligned_len)
+            prompt_len = (
+                prompt_len // self.page_size * self.page_size
+            )
+            self.match_prefix(token_ids[:prompt_len])
+
+            private_slots = (
+                req.slots[protected_len : inserted.prefix_len]
+                + req.slots[aligned_len:]
+            )
+        else:
+            private_slots = req.slots[protected_len:]
+
+        self.token_to_kv_pool_allocator.free(private_slots)
+        self.dec_lock_ref(req.last_node)
+
+        req.cache_protected_len = 0
+        req.last_node = None
