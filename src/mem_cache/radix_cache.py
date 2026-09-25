@@ -43,12 +43,12 @@ class RadixCache:
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.evictable_nodes: set[TreeNode] = set()
 
-    def insert(self, key: list[int], value: torch.Tensor) -> tuple[int, TreeNode]:
+    def _insert(self, key: list[int], value: torch.Tensor) -> tuple[int, TreeNode]:
         aligned_len = len(key) // self.page_size * self.page_size
         key = key[:aligned_len]
         value = value[:aligned_len]
 
-        indices, parent = self.match_prefix(key)
+        indices, parent = self._match_prefix(key)
         prefix_len = indices.numel()
 
         if prefix_len == aligned_len:
@@ -72,7 +72,7 @@ class RadixCache:
 
         return prefix_len, child
 
-    def match_prefix(self, prefix: list[int]) -> tuple[torch.Tensor, TreeNode]:
+    def _match_prefix(self, prefix: list[int]) -> tuple[torch.Tensor, TreeNode]:
         max_aligned_len = len(prefix) // self.page_size * self.page_size
         prefix = prefix[:max_aligned_len]
 
@@ -100,7 +100,7 @@ class RadixCache:
                     break
                 matched_len += self.page_size
             if matched_len < len(child.key):
-                child = self.split_node(child, matched_len)
+                child = self._split_node(child, matched_len)
 
             child.last_accessed = accessed_at
             matched_values.append(child.value)
@@ -116,16 +116,18 @@ class RadixCache:
 
         return indices, node
 
-    def split_node(self, child_node: TreeNode, length: int) -> TreeNode:
+    def _split_node(self, child_node: TreeNode, length: int) -> TreeNode:
         parent = child_node.parent
         old_child_key = tuple(child_node.key[:self.page_size])
 
         middle = TreeNode(
             node_id=self.next_node_id,
-            key=tuple(child_node.key[:length]),
+            key=child_node.key[:length],
             value=child_node.value[:length].clone(),
             parent=parent,
-            children={}
+            children={},
+            lock_ref=child_node.lock_ref,
+            last_accessed=child_node.last_accessed,
         )
         self.next_node_id += 1
 
@@ -136,44 +138,45 @@ class RadixCache:
         middle.children[tuple(child_node.key[:self.page_size])] = child_node
         parent.children[old_child_key] = middle
 
-        self.refresh_leaf(middle)
-        self.refresh_leaf(child_node)
+        self._refresh_leaf(middle)
+        self._refresh_leaf(child_node)
 
         return middle
 
-    def inc_lock_ref(self, node: TreeNode):
+    def _inc_lock_ref(self, node: TreeNode):
         while node is not None and node is not self.root_node:
             node.lock_ref += 1
             self._refresh_leaf(node)
             node = node.parent
 
 
-    def dec_lock_ref(self, node: TreeNode):
+    def _dec_lock_ref(self, node: TreeNode):
         while node is not None and node is not self.root_node:
             node.lock_ref -= 1
             self._refresh_leaf(node)
             node = node.parent
 
-    def refresh_leaf(self, node: TreeNode) -> None:
+    def _refresh_leaf(self, node: TreeNode) -> None:
         if(
             node is not self.root_node and not node.children and node.lock_ref == 0
         ):
             self.evictable_nodes.add(node)
+        else:
+            self.evictable_nodes.discard(node)
 
-    def free_node(self, node: TreeNode) -> int:
+    def _free_node(self, node: TreeNode) -> int:
         parent = node.parent
         released = len(node.key)
 
         self.token_to_kv_pool_allocator.free(node.value.tolist())
         del parent.children[tuple(node.key[:self.page_size])]
-        self.refresh_leaf(parent)
         self.evictable_nodes.discard(node)
         node.parent = None
 
-        self.refresh_leaf(parent)
+        self._refresh_leaf(parent)
         return released
 
-    def evict(self, num_tokens: int) -> int:
+    def _evict(self, num_tokens: int) -> int:
         candidates = [
             (node.last_accessed,node.node_id, node) for node in self.evictable_nodes
         ]
@@ -186,9 +189,9 @@ class RadixCache:
             _, _, node = heapq.heappop(candidates)
             parent = node.parent
 
-            released += self.free_node(node)
+            released += self._free_node(node)
 
-            if parent in self.evictable_leaves:
+            if parent in self.evictable_nodes:
                 heapq.heappush(candidates, (parent.last_accessed, parent.node_id, parent))
 
         return released
@@ -215,28 +218,28 @@ class RadixCache:
             device=self.req_to_token_pool.req_to_token.device,
         )
 
-        inserted = self.insert(token_ids, values)
-        matched = self.match_prefix(token_ids)
+        prefix_len, _ = self._insert(token_ids, values)
+        indices, last_node = self._match_prefix(token_ids)
 
         duplicate_slots = req.slots[
-            old_protected_len : inserted.prefix_len
+            old_protected_len : prefix_len
         ]
 
-        self.inc_lock_ref(matched.last_match_node)
+        self._inc_lock_ref(last_node)
 
-        req.slots[:aligned_len] = matched.indices.tolist()
+        req.slots[:aligned_len] = indices.tolist()
 
         self.req_to_token_pool.write(
             (req.req_pool_index, slice(0, aligned_len)),
-            matched.indices,
+            indices,
         )
 
-        self.dec_lock_ref(old_node)
+        self._dec_lock_ref(old_node)
 
         self.token_to_kv_pool_allocator.free(duplicate_slots)
 
         req.cache_protected_len = aligned_len
-        req.last_node = matched.last_match_node
+        req.last_node = last_node
         
     def cache_finished_requests(self, req: Request, is_insert: bool = True):
         """
@@ -261,23 +264,23 @@ class RadixCache:
                 device=self.req_to_token_pool.req_to_token.device,
             )
 
-            inserted = self.insert(token_ids, values)
+            prefix_len, _ = self._insert(token_ids, values)
 
             prompt_len = min(len(req.input_ids), aligned_len)
             prompt_len = (
                 prompt_len // self.page_size * self.page_size
             )
-            self.match_prefix(token_ids[:prompt_len])
+            self._match_prefix(token_ids[:prompt_len])
 
             private_slots = (
-                req.slots[protected_len : inserted.prefix_len]
+                req.slots[protected_len : prefix_len]
                 + req.slots[aligned_len:]
             )
         else:
             private_slots = req.slots[protected_len:]
 
         self.token_to_kv_pool_allocator.free(private_slots)
-        self.dec_lock_ref(req.last_node)
+        self._dec_lock_ref(req.last_node)
 
         req.cache_protected_len = 0
         req.last_node = None
