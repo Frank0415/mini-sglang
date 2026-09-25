@@ -34,11 +34,37 @@ class ScheduleBatch:
         modes = []
         device = runner.device
         for request in requests:
+            if request.req_pool_index is None:
+                row = runner.req_to_token_pool.alloc_rows(1)
+                if row is None:
+                    raise ValueError(
+                        "Failed to allocate request pool index, request pool full"
+                    )
+                request.req_pool_index = row[0]
+
+                indices, node = runner.radix_cache._match_prefix(
+                    request.input_ids[:-1]
+                )
+
+                runner.radix_cache._inc_lock_ref(node)
+
+                request.last_node = node
+                request.cache_protected_len = indices.numel()
+                request.cached_len = indices.numel()
+                request.slots = indices.tolist()
+
+                runner.req_to_token_pool.write(
+                    (request.req_pool_index, slice(0, request.cached_len)),
+                    indices,
+                )
+            
             all_ids = request.input_ids + request.output_ids
 
             prefix_len = request.cached_len
             new_ids = all_ids[prefix_len:]
             total_len = prefix_len + len(new_ids)
+            last_loc = request.slots[-1] if request.slots else -1
+            
             if not new_ids:
                 raise ValueError("Request has no pending input tokens")
             if total_len > runner.req_to_token_pool.max_context_len:
@@ -50,15 +76,6 @@ class ScheduleBatch:
             )
             if mode == ForwardMode.DECODE and len(new_ids) != 1:
                 raise ValueError("Decode requires exactly one pending token")
-            last_loc = request.slots[-1] if request.slots else -1
-
-            if request.req_pool_index is None:
-                row = runner.req_to_token_pool.alloc_rows(1)
-                if row is None:
-                    raise ValueError(
-                        "Failed to allocate request pool index, request pool full"
-                    )
-                request.req_pool_index = row[0]
 
             new_slots = runner.token_to_kv_pool_allocator.alloc_extend(
                 prefix_len=prefix_len,
@@ -66,14 +83,30 @@ class ScheduleBatch:
                 last_loc=last_loc,
                 extend_num_tokens=len(new_ids),
             )
-
             if new_slots is None:
-                # Added later by debugging scheduler:
-                # The scheduler owns cleanup. In particular, do not detach an
-                # existing row from a running request that still owns historical KV.
-                raise ValueError(
-                    "KV Cache allocation failed, KV Cache insufficient free pages"
+                allocator = runner.token_to_kv_pool_allocator
+                page_size = allocator.page_size
+
+                prefix_pages = (prefix_len + page_size - 1) // page_size
+                total_pages = (total_len + page_size - 1) // page_size
+                needed_pages = total_pages - prefix_pages
+                missing_pages = needed_pages - len(allocator.free_pages)
+
+                runner.radix_cache._evict(missing_pages * page_size)
+
+                new_slots = allocator.alloc_extend(
+                    prefix_len=prefix_len,
+                    seq_len=total_len,
+                    last_loc=last_loc,
+                    extend_num_tokens=len(new_ids),
                 )
+                if new_slots is None:
+                    # Added later by debugging scheduler:
+                    # The scheduler owns cleanup. In particular, do not detach an
+                    # existing row from a running request that still owns historical KV.
+                    raise ValueError(
+                        "KV Cache allocation failed, KV Cache insufficient free pages"
+                    )
 
             request.slots.extend(new_slots)
             locations = torch.tensor(new_slots, device=device, dtype=torch.int64)

@@ -29,7 +29,9 @@ class Scheduler:
         if request.status != RequestStatus.WAITING:
             raise ValueError("Only new waiting requests can be submitted")
         if not request.input_ids or request.max_new_tokens <= 0:
-            raise ValueError("Input must be nonempty and max_new_tokens must be positive")
+            raise ValueError(
+                "Input must be nonempty and max_new_tokens must be positive"
+            )
         self.requests[request.request_id] = request
         self.waiting.append(request)
 
@@ -44,13 +46,16 @@ class Scheduler:
             self.running.append(request)
         return self.running.copy()
 
-    def process_result(self, batch: ScheduleBatch, token_ids: list[int] | torch.Tensor) -> None:
+    def process_result(
+        self, batch: ScheduleBatch, token_ids: list[int] | torch.Tensor
+    ) -> None:
         """
-        Called after successful forward and sampling. 
+        Called after successful forward and sampling.
         Do not call with raw logits.
         """
         if len(batch.requests) != len(self.running) or any(
-            self.requests.get(request.request_id) is not request or request is not running
+            self.requests.get(request.request_id) is not request
+            or request is not running
             for request, running in zip(batch.requests, self.running)
         ):
             raise ValueError("Result does not belong to the running request")
@@ -58,7 +63,9 @@ class Scheduler:
             token_ids = token_ids.tolist()
         total_lens = batch.context.batch.seq_lens_cpu
         input_lens = batch.context.batch.extend_lens_cpu
-        for request, input_len, total_len in zip(batch.requests, input_lens, total_lens):
+        for request, input_len, total_len in zip(
+            batch.requests, input_lens, total_lens
+        ):
             if request.cached_len + input_len != total_len:
                 raise ValueError("Batch result is stale or has already been processed")
 
@@ -70,11 +77,16 @@ class Scheduler:
             elif len(request.output_ids) >= request.max_new_tokens:
                 request.finish_reason = "length"
             else:
+                self.runner.radix_cache.cache_unfinished_requests(request)
                 continue  # Keep this request running for its next decode.
 
             request.status = RequestStatus.FINISHED
             self._release(request)
-        self.running = [request for request in self.running if request.status == RequestStatus.RUNNING]
+        self.running = [
+            request
+            for request in self.running
+            if request.status == RequestStatus.RUNNING
+        ]
 
     def abort(self, request_id: str) -> None:
         request = self.requests[request_id]
@@ -87,14 +99,16 @@ class Scheduler:
 
     def _release(self, request: Request) -> None:
         """
-        Only release allocated slots, 
+        Only release allocated slots,
         including an unfinished forward's slots.
         """
-        if request.slots:
-            if torch.device(self.runner.device).type == "cuda":
-                torch.cuda.synchronize(self.runner.device)
-            self.runner.token_to_kv_pool_allocator.free(request.slots)
-            request.slots.clear()
+        if request.slots and torch.device(self.runner.device).type == "cuda":
+            torch.cuda.synchronize(self.runner.device)
+        self.runner.radix_cache.cache_finished_requests(
+            request,
+            is_insert= request.status == RequestStatus.FINISHED,
+        )
+        request.slots.clear()
         if request.req_pool_index is not None:
             self.runner.req_to_token_pool.free_rows([request.req_pool_index])
             request.req_pool_index = None
