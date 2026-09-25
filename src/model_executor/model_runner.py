@@ -13,6 +13,7 @@ from ..mem_cache.allocator import (
     TokenToKVPool,
 )
 from ..mem_cache.memory_pool import ReqToTokenPool
+from ..mem_cache.radix_cache import RadixCache
 from ..model_loader.loader import load_model
 from .forward_batch_info import ForwardBatch, ForwardContext, ForwardMode
 from .runtime import LayerBinding, ModelRuntime, PagedKVRuntime
@@ -50,6 +51,11 @@ class ModelRunner:
         self.token_to_kv_pool = MHATokenToKVPool(**asdict(kv_config))
         self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
             **asdict(allocator_config)
+        )
+        self.radix_cache = RadixCache(
+            page_size=4,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
         )
         self.attention_backend = (
             TorchAttnBackend(self.req_to_token_pool, self.token_to_kv_pool) if attn_backend is None else attn_backend
