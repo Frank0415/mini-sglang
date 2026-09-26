@@ -32,6 +32,11 @@ class Scheduler:
             raise ValueError(
                 "Input must be nonempty and max_new_tokens must be positive"
             )
+        if (
+            len(request.input_ids) + request.max_new_tokens - 1
+            > self.runner.req_to_token_pool.max_context_len
+        ):
+            raise ValueError("Requested generation exceeds max_context_len")
         self.requests[request.request_id] = request
         self.waiting.append(request)
 
