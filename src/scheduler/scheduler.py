@@ -40,6 +40,13 @@ class Scheduler:
         self.requests[request.request_id] = request
         self.waiting.append(request)
 
+    def _needed_pages(self, request: Request) -> int:
+        page_size = self.runner.token_to_kv_pool_allocator.page_size
+        target_len = len(request.input_ids) + len(request.output_ids)
+        current_pages = (request.cached_len + page_size - 1) // page_size
+        target_pages = (target_len + page_size - 1) // page_size
+        return target_pages - current_pages
+
     def get_next_requests(self) -> list[Request]:
         if self.running:
             return self.running.copy()
@@ -127,3 +134,13 @@ class Scheduler:
         if request.status != RequestStatus.FINISHED:
             raise ValueError("Request is not finished")
         return self.requests.pop(request_id)
+
+    def _retract(self, request: Request) -> None:
+        self._release(request)
+
+        self.running = [
+            item for item in self.running if item is not request
+        ]
+
+        request.status = RequestStatus.WAITING
+        self.waiting.append(request)

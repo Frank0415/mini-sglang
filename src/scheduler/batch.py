@@ -34,6 +34,7 @@ class ScheduleBatch:
         modes = []
         device = runner.device
         for request in requests:
+            all_ids = request.input_ids + request.output_ids
             if request.req_pool_index is None:
                 row = runner.req_to_token_pool.alloc_rows(1)
                 if row is None:
@@ -43,7 +44,7 @@ class ScheduleBatch:
                 request.req_pool_index = row[0]
 
                 indices, node = runner.radix_cache._match_prefix(
-                    request.input_ids[:-1]
+                    all_ids[:-1]
                 )
 
                 runner.radix_cache._inc_lock_ref(node)
@@ -58,8 +59,6 @@ class ScheduleBatch:
                     indices,
                 )
             
-            all_ids = request.input_ids + request.output_ids
-
             prefix_len = request.cached_len
             new_ids = all_ids[prefix_len:]
             total_len = prefix_len + len(new_ids)
@@ -71,7 +70,7 @@ class ScheduleBatch:
                 raise ValueError("Request exceeds max_context_len")
             mode = (
                 ForwardMode.DECODE
-                if request.output_ids and prefix_len >= len(request.input_ids)
+                if request.output_ids and len(new_ids) == 1
                 else ForwardMode.EXTEND
             )
             if mode == ForwardMode.DECODE and len(new_ids) != 1:
