@@ -47,6 +47,32 @@ class Scheduler:
         target_pages = (target_len + page_size - 1) // page_size
         return target_pages - current_pages
 
+    def _ensure_running_capacity(self) -> None:
+        retracted = False
+
+        while self.running:
+            needed = sum(self._needed_pages(request) for request in self.running)
+            free = len(self.runner.token_to_kv_pool_allocator.free_pages)
+
+            if needed <= free:
+                return retracted
+
+            self.runner.radix_cache._evict(
+                (needed - free) * self.runner.token_to_kv_pool_allocator.page_size
+            )
+
+            free = len(self.runner.token_to_kv_pool_allocator.free_pages)
+            if needed <= free:
+                return retracted
+
+            if len(self.running) <=1 :
+                raise RuntimeError("No running requests to retract, kv cache is full")
+
+            self._retract( self.running[:-1])
+            retracted = True
+
+        return retracted
+
     def get_next_requests(self) -> list[Request]:
         if self.running:
             return self.running.copy()
@@ -118,7 +144,7 @@ class Scheduler:
             torch.cuda.synchronize(self.runner.device)
         self.runner.radix_cache.cache_finished_requests(
             request,
-            is_insert= request.status == RequestStatus.FINISHED,
+            is_insert=request.status == RequestStatus.FINISHED,
         )
         request.slots.clear()
         if request.req_pool_index is not None:
@@ -138,9 +164,7 @@ class Scheduler:
     def _retract(self, request: Request) -> None:
         self._release(request)
 
-        self.running = [
-            item for item in self.running if item is not request
-        ]
+        self.running = [item for item in self.running if item is not request]
 
         request.status = RequestStatus.WAITING
         self.waiting.append(request)
