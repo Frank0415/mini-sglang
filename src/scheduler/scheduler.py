@@ -11,9 +11,15 @@ if TYPE_CHECKING:
 
 
 class Scheduler:
-    def __init__(self, runner: "ModelRunner", max_batch_size: int = 1):
+    def __init__(
+        self,
+        runner: "ModelRunner",
+        max_batch_size: int = 1,
+        decode_headroom_tokens: int = 16,
+    ):
         self.runner = runner
         self.max_batch_size = max_batch_size
+        self.decode_headroom_tokens = decode_headroom_tokens
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
         # Keep completed results accessible by request ID.
@@ -37,17 +43,27 @@ class Scheduler:
             > self.runner.req_to_token_pool.max_context_len
         ):
             raise ValueError("Requested generation exceeds max_context_len")
+        allocator = self.runner.token_to_kv_pool_allocator
+        if (
+            len(request.input_ids) + request.max_new_tokens - 1
+            > allocator.num_pages * allocator.page_size
+        ):
+            raise ValueError("Requested generation exceeds KV pool capacity")
         self.requests[request.request_id] = request
         self.waiting.append(request)
 
-    def _needed_pages(self, request: Request) -> int:
+    def _needed_pages(self, request: Request, headroom_tokens: int = 0) -> int:
         page_size = self.runner.token_to_kv_pool_allocator.page_size
         target_len = len(request.input_ids) + len(request.output_ids)
+        target_len += min(
+            headroom_tokens,
+            max(0, request.max_new_tokens - len(request.output_ids) - 1),
+        )
         current_pages = (request.cached_len + page_size - 1) // page_size
         target_pages = (target_len + page_size - 1) // page_size
         return target_pages - current_pages
 
-    def _ensure_running_capacity(self) -> None:
+    def _ensure_running_capacity(self) -> bool:
         retracted = False
 
         while self.running:
@@ -65,21 +81,69 @@ class Scheduler:
             if needed <= free:
                 return retracted
 
-            if len(self.running) <=1 :
-                raise RuntimeError("No running requests to retract, kv cache is full")
+            if len(self.running) == 1:
+                request = self.running[0]
+                self.abort(request.request_id)
+                request.finish_reason = "capacity"
+                return True
 
-            self._retract( self.running[:-1])
+            self._retract(self.running[-1])
             retracted = True
 
         return retracted
 
+    def _try_admit(self, request: Request) -> bool:
+        if not self.runner.req_to_token_pool.available_slots():
+            return False
+
+        cache = self.runner.radix_cache
+        allocator = self.runner.token_to_kv_pool_allocator
+        all_ids = request.input_ids + request.output_ids
+        indices, node = cache._match_prefix(all_ids[:-1])
+        cache._inc_lock_ref(node)
+
+        request.last_node = node
+        admitted = False
+
+        try:
+            request.cache_protected_len = indices.numel()
+            request.cached_len = indices.numel()
+            request.slots = indices.tolist()
+            available = len(allocator.free_pages) + cache._evictable_pages()
+            needed = sum(
+                self._needed_pages(item, self.decode_headroom_tokens)
+                for item in self.running
+            ) + self._needed_pages(request, self.decode_headroom_tokens)
+
+            if needed > available and self.running or self._needed_pages(request) > available:
+                    return False
+
+            request.req_pool_index = self.runner.req_to_token_pool.alloc_rows(1)[0]
+            self.runner.req_to_token_pool.write(
+                (request.req_pool_index, slice(0, request.cached_len)), indices
+            )
+            admitted = True
+            return True
+        finally:
+            if not admitted:
+                self._release(request)
+
     def get_next_requests(self) -> list[Request]:
-        if self.running:
+        if self._ensure_running_capacity():
             return self.running.copy()
         while self.waiting and len(self.running) < self.max_batch_size:
-            request = self.waiting.popleft()
+            request = self.waiting[0]
             if request.status != RequestStatus.WAITING:
+                self.waiting.popleft()
                 continue  # A waiting request may have been cancelled.
+            if not self._try_admit(request):
+                if not self.running:
+                    self.abort(request.request_id)
+                    request.finish_reason = "capacity"
+                    self.waiting.popleft()
+                    continue
+                break
+            self.waiting.popleft()
             request.status = RequestStatus.RUNNING
             self.running.append(request)
         return self.running.copy()
@@ -157,7 +221,7 @@ class Scheduler:
         Return the request result to the scheduler, freeing the request.
         """
         request = self.requests[request_id]
-        if request.status != RequestStatus.FINISHED:
+        if request.status not in (RequestStatus.FINISHED, RequestStatus.ABORTED):
             raise ValueError("Request is not finished")
         return self.requests.pop(request_id)
 

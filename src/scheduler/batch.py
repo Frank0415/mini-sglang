@@ -35,30 +35,6 @@ class ScheduleBatch:
         device = runner.device
         for request in requests:
             all_ids = request.input_ids + request.output_ids
-            if request.req_pool_index is None:
-                row = runner.req_to_token_pool.alloc_rows(1)
-                if row is None:
-                    raise ValueError(
-                        "Failed to allocate request pool index, request pool full"
-                    )
-                request.req_pool_index = row[0]
-
-                indices, node = runner.radix_cache._match_prefix(
-                    all_ids[:-1]
-                )
-
-                runner.radix_cache._inc_lock_ref(node)
-
-                request.last_node = node
-                request.cache_protected_len = indices.numel()
-                request.cached_len = indices.numel()
-                request.slots = indices.tolist()
-
-                runner.req_to_token_pool.write(
-                    (request.req_pool_index, slice(0, request.cached_len)),
-                    indices,
-                )
-            
             prefix_len = request.cached_len
             new_ids = all_ids[prefix_len:]
             total_len = prefix_len + len(new_ids)

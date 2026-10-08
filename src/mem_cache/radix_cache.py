@@ -176,6 +176,16 @@ class RadixCache:
         self._refresh_leaf(parent)
         return released
 
+    def _evictable_pages(self) -> int:
+        pages = 0
+        pending = list(self.root_node.children.values())
+        while pending:
+            node = pending.pop()
+            if node.lock_ref == 0:
+                pages += node.value.numel() // self.page_size
+            pending.extend(node.children.values())
+        return pages
+
     def _evict(self, num_tokens: int) -> int:
         candidates = [
             (node.last_accessed,node.node_id, node) for node in self.evictable_nodes

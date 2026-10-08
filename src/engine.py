@@ -16,9 +16,14 @@ class Engine:
         model_dir: str | Path,
         device: str = "cuda",
         max_batch_size: int = 4,
+        decode_headroom_tokens: int = 16,
     ):
         self.runner = ModelRunner(model_dir, device)
-        self.scheduler = Scheduler(self.runner, max_batch_size=max_batch_size)
+        self.scheduler = Scheduler(
+            self.runner,
+            max_batch_size=max_batch_size,
+            decode_headroom_tokens=decode_headroom_tokens,
+        )
 
     def add_request(
         self,
@@ -42,10 +47,11 @@ class Engine:
         """
         Do one step of inference, return none when nothing to do.
         """
-        requests = self.scheduler.get_next_requests()
-        if not requests:
-            return
+        requests = []
         try:
+            requests = self.scheduler.get_next_requests()
+            if not requests:
+                return
             batch = ScheduleBatch.prepare(requests, self.runner)
 
             logits = self.runner.forward(
@@ -62,7 +68,7 @@ class Engine:
             self.scheduler.process_result(batch, token_ids)
 
         except Exception:
-            for request in requests:
+            for request in requests or self.scheduler.running.copy():
                 self.scheduler.abort(request.request_id)
             raise
 
