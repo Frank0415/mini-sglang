@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import torch
 
-from .layers.sampler import greedy_sample
+from .layers.sampler import greedy_sample, random_sample
 from .model_executor.model_runner import ModelRunner
 from .scheduler.batch import ScheduleBatch
 from .scheduler.request import Request, RequestStatus
@@ -17,7 +17,9 @@ class Engine:
         device: str = "cuda",
         max_batch_size: int = 4,
         decode_headroom_tokens: int = 16,
+        do_sample: bool = False,
     ):
+        self.do_sample = do_sample
         self.runner = ModelRunner(model_dir, device)
         self.scheduler = Scheduler(
             self.runner,
@@ -64,7 +66,8 @@ class Engine:
             # logits[last_indices]: (batch_size, vocab_size)
             # token_ids: (batch_size)
             last_indices = batch.context.batch.extend_lens.cumsum(0) - 1
-            token_ids = greedy_sample(logits[last_indices]).tolist()
+            sampler = random_sample if self.do_sample else greedy_sample
+            token_ids = sampler(logits[last_indices]).tolist()
             self.scheduler.process_result(batch, token_ids)
 
         except Exception:

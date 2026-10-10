@@ -1,5 +1,10 @@
 # mini-sglang
 
+## 同步 RL 采样
+
+创建 `Engine(model_dir, do_sample=True)`，按 softmax 概率随机采样。当前固定
+temperature=1，使用完整词表。默认 `do_sample=False`，保持贪心生成。
+
 # 加载模型并进行推理
 
 以 `smollm2-135m-instruct` 为例，展示加载并进行推理的实现。
