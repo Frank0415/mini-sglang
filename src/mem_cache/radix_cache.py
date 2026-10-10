@@ -43,6 +43,11 @@ class RadixCache:
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.evictable_nodes: set[TreeNode] = set()
 
+    def clear(self) -> None:
+        self._evict(
+            self.token_to_kv_pool_allocator.num_pages * self.page_size
+        )
+
     def _insert(self, key: list[int], value: torch.Tensor) -> tuple[int, TreeNode]:
         aligned_len = len(key) // self.page_size * self.page_size
         key = key[:aligned_len]

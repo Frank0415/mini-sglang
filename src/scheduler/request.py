@@ -31,3 +31,4 @@ class Request:
     status: RequestStatus = RequestStatus.WAITING
     finish_reason: str | None = None
     output_log_probs: list[float] = field(default_factory=list)
+    weight_version: int = 0

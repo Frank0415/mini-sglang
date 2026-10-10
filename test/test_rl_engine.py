@@ -70,6 +70,46 @@ class RLEngineTests(unittest.TestCase):
         self.assertEqual(request.output_log_probs, [event["log_prob"]])
         self.assertAlmostEqual(event["log_prob"], -math.log(2), places=6)
 
+    def test_weight_update_clears_cached_prefix_and_commits_version(self):
+        engine = make_engine()
+        old_result = engine.generate([3, 4, 5, 6, 7], 1)
+        cache = engine.runner.radix_cache
+        prefix, _ = cache._match_prefix([3, 4, 5, 6])
+        self.assertEqual(prefix.numel(), 4)
+        weights = [("weight", torch.ones(1))]
+        engine.update_weights(weights, version=3)
+        engine.runner.model.load_weights.assert_called_once_with(weights)
+        self.assertEqual(cache.root_node.children, {})
+        self.assertEqual(cache.evictable_nodes, set())
+        allocator = engine.runner.token_to_kv_pool_allocator
+        self.assertEqual(sorted(allocator.free_pages), list(range(1, 33)))
+        self.assertEqual(engine.installed_version, 3)
+        self.assertEqual(old_result.weight_version, 0)
+        new_result = engine.generate([3, 4, 5, 6, 7], 1)
+        self.assertEqual(new_result.weight_version, 3)
+
+    def test_weight_update_rejects_waiting_and_running_requests(self):
+        engine = make_engine()
+        request_id = engine.add_request([3, 4, 5], 5)
+        with self.assertRaises(RuntimeError):
+            engine.update_weights([], version=1)
+        engine.step()
+        with self.assertRaises(RuntimeError):
+            engine.update_weights([], version=1)
+        engine.runner.model.load_weights.assert_not_called()
+        self.assertEqual(engine.installed_version, 0)
+        engine.abort(request_id)
+        engine.free_request(request_id)
+        engine.update_weights([], version=1)
+        self.assertEqual(engine.installed_version, 1)
+
+    def test_weight_update_failure_keeps_version(self):
+        engine = make_engine()
+        engine.runner.model.load_weights.side_effect = ValueError("Missing weights")
+        with self.assertRaisesRegex(ValueError, "Missing weights"):
+            engine.update_weights([], version=1)
+        self.assertEqual(engine.installed_version, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

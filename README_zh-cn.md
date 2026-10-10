@@ -9,6 +9,11 @@ temperature=1，使用完整词表。默认 `do_sample=False`，保持贪心生�
 `output_log_probs`，按生成位置一一对应，包含 EOS。`step()` 也返回本次词元的
 `log_prob`。这些值来自模型的完整 softmax；启用随机采样时，它们就是采样概率的对数。
 
+一轮采样结束后，调用 `engine.update_weights(model.state_dict().items(), version)`。
+引擎加载参数、等待 GPU 写入完成、释放旧前缀缓存，再设置 `installed_version`。
+有等待或运行中的请求时，更新会报错。Request 的 `weight_version` 和 `step()` 的
+同名字段记录该请求实际使用的版本；初始版本为 0。
+
 # 加载模型并进行推理
 
 以 `smollm2-135m-instruct` 为例，展示加载并进行推理的实现。

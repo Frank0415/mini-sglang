@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ class Engine:
         do_sample: bool = False,
     ):
         self.do_sample = do_sample
+        self.installed_version = 0
         self.runner = ModelRunner(model_dir, device)
         self.scheduler = Scheduler(
             self.runner,
@@ -39,6 +41,7 @@ class Engine:
             request_id=request_id,
             input_ids=list(input_ids),
             max_new_tokens=max_new_tokens,
+            weight_version=self.installed_version,
         )
 
         self.scheduler.add_request(request)
@@ -85,6 +88,7 @@ class Engine:
             "request_id": request.request_id,
             "token_id": token_id,
             "log_prob": log_prob,
+            "weight_version": request.weight_version,
             "finished": request.status == RequestStatus.FINISHED,
             "finish_reason": request.finish_reason,
         } for request, token_id, log_prob in zip(requests, token_ids, token_log_probs)]
@@ -94,6 +98,22 @@ class Engine:
 
     def free_request(self, request_id: str):
         return self.scheduler.return_request_result(request_id)
+
+    def update_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+        version: int,
+    ) -> None:
+        if self.scheduler.running or any(
+            request.status == RequestStatus.WAITING
+            for request in self.scheduler.waiting
+        ):
+            raise RuntimeError("Finish pending requests before updating weights")
+        self.runner.model.load_weights(weights)
+        if torch.device(self.runner.device).type == "cuda":
+            torch.cuda.synchronize(self.runner.device)
+        self.runner.radix_cache.clear()
+        self.installed_version = version
 
     def generate(
         self,
