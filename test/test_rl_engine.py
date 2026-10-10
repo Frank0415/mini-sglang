@@ -1,3 +1,4 @@
+import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -10,7 +11,7 @@ from src.mem_cache.memory_pool import ReqToTokenPool
 from src.mem_cache.radix_cache import RadixCache
 
 
-def make_engine(do_sample=False):
+def make_engine(do_sample=False, scores=(0, 0)):
     pool = ReqToTokenPool(4, 128, "cpu")
     allocator = PagedTokenToKVPoolAllocator(4, 32)
     cache = RadixCache(4, pool, allocator)
@@ -23,8 +24,8 @@ def make_engine(do_sample=False):
 
     def forward(ids, positions, context):
         logits = torch.full((len(ids), 16), -torch.inf)
-        logits[:, 7] = 0
-        logits[:, 9] = 0
+        logits[:, 7] = scores[0]
+        logits[:, 9] = scores[1]
         return logits
 
     runner.forward = forward
@@ -47,6 +48,27 @@ class RLEngineTests(unittest.TestCase):
         self.assertEqual({token for r in results for token in r.output_ids}, {7, 9})
         self.assertEqual(engine.scheduler.requests, {})
         self.assertEqual(engine.runner.req_to_token_pool.available_slots(), 4)
+
+    def test_log_probs_match_sampled_tokens(self):
+        torch.manual_seed(7)
+        engine = make_engine(do_sample=True, scores=(0, math.log(3)))
+        results = engine.generate_batch([[3, 4, 5]] * 4, 5)
+        expected = {7: math.log(0.25), 9: math.log(0.75)}
+        for request in results:
+            self.assertEqual(len(request.output_log_probs), len(request.output_ids))
+            for token, log_prob in zip(request.output_ids, request.output_log_probs):
+                self.assertAlmostEqual(log_prob, expected[token], places=6)
+
+    def test_step_returns_log_prob_for_eos(self):
+        engine = make_engine()
+        engine.scheduler.eos_token_ids = {7}
+        request_id = engine.add_request([3, 4, 5], 5)
+        event = engine.step()[0]
+        request = engine.free_request(request_id)
+        self.assertEqual(request.output_ids, [7])
+        self.assertEqual(request.finish_reason, "eos")
+        self.assertEqual(request.output_log_probs, [event["log_prob"]])
+        self.assertAlmostEqual(event["log_prob"], -math.log(2), places=6)
 
 
 if __name__ == "__main__":

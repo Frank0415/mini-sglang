@@ -5,6 +5,10 @@
 创建 `Engine(model_dir, do_sample=True)`，按 softmax 概率随机采样。当前固定
 temperature=1，使用完整词表。默认 `do_sample=False`，保持贪心生成。
 
+`generate()` 和 `generate_batch()` 返回的 Request 包含 `output_ids` 与
+`output_log_probs`，按生成位置一一对应，包含 EOS。`step()` 也返回本次词元的
+`log_prob`。这些值来自模型的完整 softmax；启用随机采样时，它们就是采样概率的对数。
+
 # 加载模型并进行推理
 
 以 `smollm2-135m-instruct` 为例，展示加载并进行推理的实现。

@@ -67,8 +67,14 @@ class Engine:
             # token_ids: (batch_size)
             last_indices = batch.context.batch.extend_lens.cumsum(0) - 1
             sampler = random_sample if self.do_sample else greedy_sample
-            token_ids = sampler(logits[last_indices]).tolist()
+            next_token_logits = logits[last_indices]
+            token_ids = sampler(next_token_logits)
+            log_probs = next_token_logits.float().log_softmax(dim=-1)
+            token_log_probs = log_probs.gather(1, token_ids[:, None]).squeeze(-1).tolist()
+            token_ids = token_ids.tolist()
             self.scheduler.process_result(batch, token_ids)
+            for request, log_prob in zip(requests, token_log_probs):
+                request.output_log_probs.append(log_prob)
 
         except Exception:
             for request in requests or self.scheduler.running.copy():
@@ -78,9 +84,10 @@ class Engine:
         return [{
             "request_id": request.request_id,
             "token_id": token_id,
+            "log_prob": log_prob,
             "finished": request.status == RequestStatus.FINISHED,
             "finish_reason": request.finish_reason,
-        } for request, token_id in zip(requests, token_ids)]
+        } for request, token_id, log_prob in zip(requests, token_ids, token_log_probs)]
 
     def abort(self, request_id: str):
         self.scheduler.abort(request_id)
